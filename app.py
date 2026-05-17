@@ -139,15 +139,32 @@ def _extrair_partes_do_nome(nome: str) -> dict:
 
 
 def _extrair_campo(texto: str, label: str) -> str:
-    """Extrai o valor de um campo 'Label: valor' ou 'Label valor' no texto."""
-    # Tenta com dois pontos: "Reclamante: Fulano"
-    m = re.search(rf'(?i){label}\s*[:\-]\s*(.+)', texto)
-    if m:
-        val = m.group(1).split('\n')[0]
-        val = re.split(r'\s{3,}|\t|\|', val)[0].strip()
-        val = re.sub(r'\s+', ' ', val).strip()
-        if 3 <= len(val) <= 120:
-            return val
+    """
+    Extrai o valor de um campo em múltiplos formatos:
+      - 'Label: Valor'  ou  'Label - Valor'
+      - 'Label | Valor'  (células de tabela)
+      - 'Label\\nValor'  (label numa linha, valor na seguinte)
+    """
+    linhas = texto.split('\n')
+    for i, linha in enumerate(linhas):
+        # Mesmo linha: Label: Valor  /  Label - Valor  /  Label | Valor
+        m = re.match(rf'(?i)\s*{label}\s*[:\-\|]\s*(.+)', linha)
+        if m:
+            val = re.split(r'\s{3,}|\t|\|', m.group(1))[0].strip()
+            val = re.sub(r'\s+', ' ', val).strip()
+            if 3 <= len(val) <= 120:
+                return val
+
+        # Label sozinho na linha → valor na próxima linha não vazia
+        if re.match(rf'(?i)^\s*{label}\s*$', linha.strip()):
+            for j in range(i + 1, min(i + 3, len(linhas))):
+                val = linhas[j].strip()
+                if val:
+                    val = re.split(r'\s{3,}|\t|\|', val)[0].strip()
+                    val = re.sub(r'\s+', ' ', val).strip()
+                    if 3 <= len(val) <= 120:
+                        return val
+                    break
     return ''
 
 
@@ -851,66 +868,6 @@ class App(ctk.CTk):
         )
         self.detect_lbl.pack(fill="x", padx=24, pady=(0, 18))
 
-        # ── IDENTIFICAÇÃO DO PROCESSO ──────────────────────────────────────
-        ident = self._cartao(self, padx=24, pady=(0, 10))
-        self._titulo_passo(ident, "2", "Identificação do Processo",
-                            "Será preenchido automaticamente ao escolher o pré-laudo.")
-
-        # Reclamante (linha cheia)
-        ctk.CTkLabel(ident, text="Reclamante", font=FONT_LABEL,
-                     text_color=COR_TEXTO, anchor="w"
-                     ).pack(fill="x", padx=24, pady=(4, 2))
-        ctk.CTkEntry(ident, textvariable=self.reclamante,
-                     height=ALTURA_ENTRY, font=FONT_ENTRY,
-                     border_color=COR_BORDA, text_color=COR_TEXTO,
-                     ).pack(fill="x", padx=24, pady=(0, 8))
-
-        # Reclamada (linha cheia)
-        ctk.CTkLabel(ident, text="Reclamada", font=FONT_LABEL,
-                     text_color=COR_TEXTO, anchor="w"
-                     ).pack(fill="x", padx=24, pady=(0, 2))
-        ctk.CTkEntry(ident, textvariable=self.reclamada,
-                     height=ALTURA_ENTRY, font=FONT_ENTRY,
-                     border_color=COR_BORDA, text_color=COR_TEXTO,
-                     ).pack(fill="x", padx=24, pady=(0, 8))
-
-        # Função (linha cheia)
-        ctk.CTkLabel(ident, text="Função / Cargo", font=FONT_LABEL,
-                     text_color=COR_TEXTO, anchor="w"
-                     ).pack(fill="x", padx=24, pady=(0, 2))
-        ctk.CTkEntry(ident, textvariable=self.funcao,
-                     height=ALTURA_ENTRY, font=FONT_ENTRY,
-                     border_color=COR_BORDA, text_color=COR_TEXTO,
-                     ).pack(fill="x", padx=24, pady=(0, 10))
-
-        # Tipo
-        ctk.CTkLabel(ident, text="Tipo de Perícia", font=FONT_LABEL,
-                     text_color=COR_TEXTO, anchor="w"
-                     ).pack(fill="x", padx=24, pady=(0, 4))
-        row_tipo = ctk.CTkFrame(ident, fg_color="transparent")
-        row_tipo.pack(fill="x", padx=24, pady=(0, 10))
-        ctk.CTkCheckBox(
-            row_tipo, text="  Insalubridade",
-            variable=self.tipo_insalubr,
-            font=FONT_LABEL, text_color=COR_TEXTO,
-            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-            checkbox_width=26, checkbox_height=26,
-        ).pack(side="left", padx=(0, 32))
-        ctk.CTkCheckBox(
-            row_tipo, text="  Periculosidade",
-            variable=self.tipo_periculos,
-            font=FONT_LABEL, text_color=COR_TEXTO,
-            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-            checkbox_width=26, checkbox_height=26,
-        ).pack(side="left")
-
-        self.ident_status = ctk.CTkLabel(
-            ident,
-            text="Aguardando seleção do pré-laudo…",
-            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
-        )
-        self.ident_status.pack(fill="x", padx=24, pady=(0, 18))
-
         # ── Abas ────────────────────────────────────────────────────────────
         tabs = ctk.CTkTabview(
             self, fg_color=COR_FUNDO,
@@ -948,6 +905,62 @@ class App(ctk.CTk):
         # ── Área rolável com os passos ──────────────────────────────────────
         main = ctk.CTkScrollableFrame(wrapper, fg_color=COR_FUNDO)
         main.grid(row=0, column=0, sticky="nsew")
+
+        # Passo 2 — Identificação do Processo
+        c2 = self._cartao(main)
+        self._titulo_passo(c2, "2", "Identificação do Processo",
+                            "Preenchido automaticamente ao escolher a pasta.")
+
+        row_rec = ctk.CTkFrame(c2, fg_color="transparent")
+        row_rec.pack(fill="x", padx=24, pady=(4, 8))
+        for label, var, w in [
+            ("Reclamante", self.reclamante, 1),
+            ("Reclamada",  self.reclamada,  1),
+        ]:
+            col = ctk.CTkFrame(row_rec, fg_color="transparent")
+            col.pack(side="left", fill="x", expand=True,
+                     padx=(0, 16) if label == "Reclamante" else (0, 0))
+            ctk.CTkLabel(col, text=label, font=FONT_LABEL,
+                         text_color=COR_TEXTO, anchor="w").pack(anchor="w")
+            ctk.CTkEntry(col, textvariable=var, height=ALTURA_ENTRY,
+                         font=FONT_ENTRY, border_color=COR_BORDA,
+                         text_color=COR_TEXTO).pack(fill="x", pady=(2, 0))
+
+        row_fc = ctk.CTkFrame(c2, fg_color="transparent")
+        row_fc.pack(fill="x", padx=24, pady=(0, 8))
+
+        col_fn = ctk.CTkFrame(row_fc, fg_color="transparent")
+        col_fn.pack(side="left", fill="x", expand=True, padx=(0, 16))
+        ctk.CTkLabel(col_fn, text="Função / Cargo", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w").pack(anchor="w")
+        ctk.CTkEntry(col_fn, textvariable=self.funcao, height=ALTURA_ENTRY,
+                     font=FONT_ENTRY, border_color=COR_BORDA,
+                     text_color=COR_TEXTO).pack(fill="x", pady=(2, 0))
+
+        col_tp = ctk.CTkFrame(row_fc, fg_color="transparent")
+        col_tp.pack(side="left", fill="none")
+        ctk.CTkLabel(col_tp, text="Tipo de Perícia", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w").pack(anchor="w")
+        row_chk = ctk.CTkFrame(col_tp, fg_color="transparent")
+        row_chk.pack(anchor="w", pady=(6, 0))
+        ctk.CTkCheckBox(row_chk, text=" Insalubridade",
+                        variable=self.tipo_insalubr,
+                        font=FONT_LABEL, text_color=COR_TEXTO,
+                        fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+                        checkbox_width=24, checkbox_height=24,
+                        ).pack(side="left", padx=(0, 20))
+        ctk.CTkCheckBox(row_chk, text=" Periculosidade",
+                        variable=self.tipo_periculos,
+                        font=FONT_LABEL, text_color=COR_TEXTO,
+                        fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+                        checkbox_width=24, checkbox_height=24,
+                        ).pack(side="left")
+
+        self.ident_status = ctk.CTkLabel(
+            c2, text="Aguardando seleção da pasta…",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
+        )
+        self.ident_status.pack(fill="x", padx=24, pady=(6, 14))
 
         # Passo 3 — Pré-laudo
         c3 = self._cartao(main)
