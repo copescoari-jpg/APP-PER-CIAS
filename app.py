@@ -132,6 +132,9 @@ def _extrair_partes_do_nome(nome: str) -> dict:
         r'anota\w*|dilig\w*|secretar\w*|processo)\s*[\-_]?\s*',
         '', nome
     ).strip()
+    # Remove sufixos do nosso próprio padrão de nome: "= Insalubr. = Função"
+    # para que a reclamada não inclua esses campos adicionais
+    clean = re.split(r'\s+=\s+', clean)[0].strip()
     m = re.match(r'^(.+?)\s+[xX]\s+(.+)$', clean)
     if m:
         return {'reclamante': m.group(1).strip(), 'reclamada': m.group(2).strip()}
@@ -1416,11 +1419,7 @@ class App(ctk.CTk):
                 self.tipo_insalubr.get(), self.tipo_periculos.get(),
                 self.funcao.get()
             )
-            destino = pasta_destino_laudo(
-                self.processo_folder.get(),
-                self.reclamante.get(), self.reclamada.get()
-            )
-            out = output_path(str(destino), fname)
+            out = output_path(self.processo_folder.get(), fname)
 
             txt = gerar_laudo(
                 api_key=self.api_key, pre_laudo=pre, campo=camp,
