@@ -890,6 +890,31 @@ class App(ctk.CTk):
     # ── Aba: Gerar Laudo ─────────────────────────────────────────────────────
 
     def _build_laudo_tab(self, parent):
+        # ── Rodapé fixo com botão (sempre visível) — empacotado ANTES do scroll ──
+        bottom = ctk.CTkFrame(parent, fg_color=COR_FUNDO, corner_radius=0)
+        bottom.pack(fill="x", side="bottom", padx=0, pady=0)
+
+        self.btn_laudo = ctk.CTkButton(
+            bottom, text="▶   GERAR LAUDO PERICIAL", height=ALTURA_BTN_GR,
+            font=FONT_BTN_GR, corner_radius=12,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            command=self._start_laudo,
+        )
+        self.btn_laudo.pack(padx=24, pady=(10, 4), fill="x")
+
+        self.prog_laudo = ctk.CTkProgressBar(
+            bottom, mode="indeterminate", height=14,
+            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
+        )
+        self.prog_laudo.pack(padx=24, fill="x")
+        self.prog_laudo.set(0)
+
+        self.lbl_laudo = ctk.CTkLabel(
+            bottom, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
+        )
+        self.lbl_laudo.pack(pady=(4, 10))
+
+        # ── Área rolável com os passos ─────────────────────────────────────────
         main = ctk.CTkScrollableFrame(parent, fg_color=COR_FUNDO)
         main.pack(fill="both", expand=True)
 
@@ -968,27 +993,6 @@ class App(ctk.CTk):
             text_color=COR_TEXTO,
         )
         self.obs_laudo.pack(fill="x", padx=24, pady=(4, 16))
-
-        # Botão grande
-        self.btn_laudo = ctk.CTkButton(
-            main, text="▶   GERAR LAUDO PERICIAL", height=ALTURA_BTN_GR,
-            font=FONT_BTN_GR, corner_radius=12,
-            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-            command=self._start_laudo,
-        )
-        self.btn_laudo.pack(padx=24, pady=(8, 6), fill="x")
-
-        self.prog_laudo = ctk.CTkProgressBar(
-            main, mode="indeterminate", height=16,
-            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
-        )
-        self.prog_laudo.pack(padx=24, fill="x")
-        self.prog_laudo.set(0)
-
-        self.lbl_laudo = ctk.CTkLabel(
-            main, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
-        )
-        self.lbl_laudo.pack(pady=(10, 32))
 
     # ── Aba: Responder Impugnação ────────────────────────────────────────────
 
