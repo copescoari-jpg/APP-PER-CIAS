@@ -718,6 +718,17 @@ REGRAS ABSOLUTAS — LAUDO PERICIAL (prioridade máxima):
 
    SEÇÃO 8 (abertura obrigatória): "A palavra 'insalubre' vem do latim e significa tudo aquilo que origina doença, sendo que a insalubridade é a qualidade de insalubre. Já o conceito legal de insalubridade é dado pelo artigo 189 da Consolidação das Leis do Trabalho, nos seguintes termos: 'Serão consideradas atividades ou operações insalubres aquelas que, por sua natureza, condições ou métodos de trabalho, exponham os empregados a agentes nocivos à saúde, acima dos limites de tolerância, fixados em razão da natureza e da intensidade do agente e do tipo de exposição aos seus efeitos'."
 
+   SEÇÃO 8 — DADOS OBRIGATÓRIOS DO INSTRUMENTO (extrair dos documentos de avaliação fornecidos):
+   Para cada avaliação técnica, identifique e inclua no corpo da seção:
+   - Tipo de agente avaliado (ruído, calor/IBUTG, vibração, RNI, etc.)
+   - Marca e modelo do aparelho de medição (ex: "Decibelímetro Brüel & Kjær, modelo 2250")
+   - Número de série do aparelho
+   - Data de calibração ou validade do certificado (se constar)
+   - Resultado numérico com unidade (ex: "89,3 dB(A)", "IBUTG = 26,7°C", "dose de 48%")
+   - Limite de tolerância aplicável e comparação direta com o resultado medido
+   PROIBIDO inventar ou omitir esses dados — use SOMENTE o que constar nos documentos fornecidos.
+   Se algum campo não constar no documento, escreva "não identificado no documento".
+
    HONORÁRIOS: "Após ter cumprido a tarefa que lhe foi confiada, vem o perito requerer, com a devida cautela e respeito, o arbitramento de seus honorários periciais definidos em R$ 4.500,00 (Quatro mil e quinhentos reais)."
 
    CONCLUSÃO (abertura): "Pelo resultado das avaliações apresentadas no laudo pericial, onde foram relatados os riscos potenciais à saúde, sob o ponto de vista de Higiene e Segurança do Trabalho, e com embasamento nas declarações do citado documento, concluímos que:"
@@ -732,8 +743,12 @@ REGRAS ABSOLUTAS — LAUDO PERICIAL (prioridade máxima):
    SEM bullet points no corpo do laudo. Seções separadas por linha em branco.
 """
 
+MAX_AVAL_PAGES = 4   # máximo de páginas por PDF de avaliação enviadas ao Claude
+
+
 def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
-                ref_laudo="", obs="", avaliacoes="", progress_cb=None) -> str:
+                ref_laudo="", obs="", avaliacoes="", avaliacoes_paths=None,
+                progress_cb=None) -> str:
     client = anthropic.Anthropic(api_key=api_key)
 
     ref_block = (
@@ -746,7 +761,7 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
     ) if obs else ""
 
     aval_block = (
-        f"\n=== AVALIAÇÕES TÉCNICAS REALIZADAS NA PERÍCIA ===\n{avaliacoes}\n"
+        f"\n=== AVALIAÇÕES TÉCNICAS — TEXTO EXTRAÍDO ===\n{avaliacoes}\n"
     ) if avaliacoes else ""
 
     system_prompt = (
@@ -760,6 +775,10 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
         + "\n\nRetorne APENAS o texto do laudo, sem comentários adicionais."
     )
 
+    # ── Monta lista de PDFs de avaliação a enviar como imagem ──────────────
+    aval_pdfs = [Path(p) for p in (avaliacoes_paths or [])
+                 if Path(p).suffix.lower() == ".pdf"]
+
     user_parts = []
     intro = (
         f"Elabore o laudo pericial COMPLETO com base nos documentos abaixo."
@@ -767,14 +786,37 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
         f"=== PRÉ-LAUDO (preparado pelas secretárias) ===\n{pre_laudo}\n\n"
         f"=== ANOTAÇÕES DE CAMPO / DADOS DA DILIGÊNCIA ===\n{campo}\n\n"
         f"{aval_block}"
-        f"=== FOTOS DA DILIGÊNCIA ===\n"
     )
+    if aval_pdfs:
+        intro += "=== AVALIAÇÕES TÉCNICAS — IMAGENS DOS DOCUMENTOS (seguem abaixo) ===\n"
+        for ap in aval_pdfs:
+            intro += f"• {ap.stem}\n"
+        intro += "\n"
+    intro += "=== FOTOS DA DILIGÊNCIA ===\n"
     for ph in photos:
         nome = ph.stem.replace("_", " ").replace("-", " ")
         intro += f"• {ph.name} — {nome}\n"
-    intro += "\nImagens anexadas abaixo. Elabore o laudo COMPLETO agora."
+    intro += "\nTodas as imagens estão anexadas abaixo. Elabore o laudo COMPLETO agora."
     user_parts.append({"type": "text", "text": intro})
 
+    # ── Imagens das avaliações técnicas (antes das fotos de campo) ──────────
+    for ap in aval_pdfs:
+        if progress_cb:
+            progress_cb(f"Carregando avaliação: {ap.name}")
+        user_parts.append({"type": "text",
+                            "text": f"\n[Avaliação técnica: {ap.stem}]"})
+        pages = pdf_paginas_como_imagens(str(ap), dpi=120)
+        for pg_num, pg_img in enumerate(pages[:MAX_AVAL_PAGES], 1):
+            buf = io.BytesIO()
+            pg_img.save(buf, format="JPEG", quality=75)
+            data = base64.standard_b64encode(buf.getvalue()).decode()
+            user_parts.append({"type": "image",
+                                "source": {"type": "base64",
+                                           "media_type": "image/jpeg", "data": data}})
+            user_parts.append({"type": "text",
+                                "text": f"[Página {pg_num} de {ap.stem}]"})
+
+    # ── Fotos de campo ───────────────────────────────────────────────────────
     for i, ph in enumerate(photos):
         if progress_cb:
             progress_cb(f"Carregando foto {i+1}/{len(photos)}: {ph.name}")
@@ -1576,6 +1618,7 @@ class App(ctk.CTk):
                 api_key=self.api_key, pre_laudo=pre, campo=camp,
                 photos=self.photos_list, agente_md=agente, perfil_md=perfil,
                 ref_laudo=ref, obs=obs, avaliacoes=avaliacoes_text,
+                avaliacoes_paths=self.avaliacoes_paths or None,
                 progress_cb=self._set_sl,
             )
 
