@@ -580,7 +580,7 @@ def _add_docx_header_footer(sec):
 
 # Padrões para formatação especial nos quesitos
 _RE_RESPOSTA  = re.compile(r'^(Resposta\s*:)(.*)', re.IGNORECASE | re.DOTALL)
-_RE_QUESITO_N = re.compile(r'^(\d{1,2}\s*[-\.\)]\s+)(.+)', re.DOTALL)
+_RE_QUESITO_N = re.compile(r'^(\d{1,2}\s*[-\.\)]\s+|[a-zA-Z][\.\)]\s+)(.+)', re.DOTALL)
 
 
 def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
@@ -741,6 +741,14 @@ REGRAS ABSOLUTAS — LAUDO PERICIAL (prioridade máxima):
 
 7. FORMATO: texto puro. SEM markdown (sem **, sem #, sem *, sem -). Parágrafos por \\n.
    SEM bullet points no corpo do laudo. Seções separadas por linha em branco.
+
+8. AVALIAÇÃO DE RUÍDO — mencionar SOMENTE os três valores abaixo:
+   - Dose de exposição (%)
+   - Dose projetada para a jornada completa (%)
+   - Nível médio ponderado LAVG ou Leq em dB(A)
+   NÃO mencionar nenhum outro dado do relatório: Lmax, Lmin, Lpico, L10, L50, L90,
+   TWA, SEL, kurtosis, percentis, histogramas, níveis parciais ou qualquer outra
+   métrica que não sejam os três itens acima.
 """
 
 MAX_AVAL_PAGES = 4   # máximo de páginas por PDF de avaliação enviadas ao Claude
