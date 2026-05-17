@@ -3,3 +3,4 @@ customtkinter
 python-docx
 Pillow
 pdfplumber
+pymupdf

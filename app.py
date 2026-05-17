@@ -17,7 +17,7 @@ from datetime import date
 from pathlib import Path
 import anthropic
 from docx import Document
-from docx.shared import Pt, Emu, RGBColor
+from docx.shared import Pt, Emu, Cm, RGBColor
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -276,6 +276,22 @@ def encode_image(path: str) -> tuple:
         img.save(buf, format="JPEG", quality=85)
     return base64.standard_b64encode(buf.getvalue()).decode(), "image/jpeg"
 
+def pdf_paginas_como_imagens(pdf_path: str, dpi: int = 150) -> list:
+    """Converte cada página de um PDF em PIL.Image (RGB) usando pymupdf."""
+    try:
+        import fitz  # pymupdf
+        doc = fitz.open(pdf_path)
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        imgs = []
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            imgs.append(img)
+        doc.close()
+        return imgs
+    except Exception:
+        return []
+
 def get_photos(folder: str) -> list:
     return sorted(
         [f for f in Path(folder).iterdir() if f.suffix.lower() in IMAGE_EXT]
@@ -505,7 +521,7 @@ def _add_docx_header_footer(sec):
         run.font.italic = True
 
 
-def save_docx(text: str, out: str):
+def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
     doc = Document()
     for sec in doc.sections:
         sec.top_margin      = Emu(540385)
@@ -535,6 +551,46 @@ def save_docx(text: str, out: str):
             r = p.add_run(s)
         r.font.name = "Arial"
         r.font.size = Pt(12)
+
+    # ── Anexos: páginas dos PDFs de avaliação ──────────────────────────────
+    if avaliacoes_paths:
+        doc.add_page_break()
+        ph = doc.add_paragraph()
+        ph.paragraph_format.space_before = Pt(14)
+        ph.paragraph_format.space_after  = Pt(10)
+        rh = ph.add_run("ANEXOS — AVALIAÇÕES TÉCNICAS")
+        rh.bold = True
+        rh.font.name = "Arial"
+        rh.font.size = Pt(12)
+
+        # Largura disponível: página menos margens (~16 cm a 150 dpi)
+        usable_width_cm = 16.0
+
+        for aval_path in avaliacoes_paths:
+            aval_path = Path(aval_path)
+            if aval_path.suffix.lower() != ".pdf":
+                continue
+
+            # Título do documento
+            pt = doc.add_paragraph()
+            pt.paragraph_format.space_before = Pt(10)
+            pt.paragraph_format.space_after  = Pt(4)
+            rt = pt.add_run(aval_path.stem)
+            rt.bold = True
+            rt.font.name = "Arial"
+            rt.font.size = Pt(11)
+
+            pages = pdf_paginas_como_imagens(str(aval_path), dpi=150)
+            for img in pages:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                pi = doc.add_paragraph()
+                pi.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pi.paragraph_format.space_before = Pt(4)
+                pi.paragraph_format.space_after  = Pt(4)
+                run = pi.add_run()
+                run.add_picture(buf, width=Cm(usable_width_cm))
 
     doc.save(out)
 
@@ -1436,7 +1492,7 @@ class App(ctk.CTk):
             )
 
             self._set_sl("Salvando .docx...")
-            save_docx(txt, out)
+            save_docx(txt, out, avaliacoes_paths=self.avaliacoes_paths or None)
 
             self.meu_laudo_path.set(out)
             self.laudo_ref_lbl.configure(
