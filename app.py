@@ -351,10 +351,17 @@ def auto_detect(folder: str) -> dict:
     return r
 
 def output_path(folder: str, prefix: str) -> str:
+    # Limita o nome do arquivo para que o caminho total fique abaixo de 259 chars.
+    # Windows MAX_PATH = 260; reservamos: pasta + sep(1) + .docx(5) = pasta + 6
+    folder_len = len(str(Path(folder)))
+    max_nome = max(20, 259 - folder_len - 6)
+    prefix = prefix[:max_nome]
+
     p = Path(folder) / f"{prefix}.docx"
     n = 2
     while p.exists():
-        p = Path(folder) / f"{prefix}_{n}.docx"
+        sfx = f"_{n}"
+        p = Path(folder) / f"{prefix[:max_nome - len(sfx)]}{sfx}.docx"
         n += 1
     return str(p)
 
