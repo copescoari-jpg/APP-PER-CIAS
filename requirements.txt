@@ -1,0 +1,5 @@
+anthropic
+customtkinter
+python-docx
+Pillow
+pdfplumber

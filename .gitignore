@@ -1,0 +1,18 @@
+# Configuração local (contém a chave API)
+~/.sistema_ari/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Arquivos gerados / laudos
+*.docx
+*.pdf
+
+# Windows
+Thumbs.db
+desktop.ini
