@@ -514,11 +514,15 @@ def _add_docx_header_footer(sec):
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after  = Pt(0)
-        p.paragraph_format.line_spacing = Pt(11)
         run = p.add_run(line)
         run.font.name = "Arial"
         run.font.size = Pt(10)
         run.font.italic = True
+
+
+# Padrões para formatação especial nos quesitos
+_RE_RESPOSTA  = re.compile(r'^(Resposta\s*:)(.*)', re.IGNORECASE | re.DOTALL)
+_RE_QUESITO_N = re.compile(r'^(\d{1,2}\s*[-\.\)]\s+)(.+)', re.DOTALL)
 
 
 def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
@@ -543,14 +547,32 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
             continue
         p = doc.add_paragraph()
         p.paragraph_format.space_after = Pt(4)
+
+        def _run(txt, bold=False, italic=False):
+            r = p.add_run(txt)
+            r.font.name = "Arial"
+            r.font.size = Pt(12)
+            r.bold   = bold
+            r.italic = italic
+
         if _is_header(s):
             p.paragraph_format.space_before = Pt(14)
-            r = p.add_run(s)
-            r.bold = True
+            _run(s, bold=True)
         else:
-            r = p.add_run(s)
-        r.font.name = "Arial"
-        r.font.size = Pt(12)
+            m_resp = _RE_RESPOSTA.match(s)
+            m_ques = _RE_QUESITO_N.match(s)
+            if m_resp:
+                # "Resposta:" em negrito; texto da resposta em itálico
+                _run(m_resp.group(1), bold=True)
+                resto = m_resp.group(2).strip()
+                if resto:
+                    _run(" " + resto, italic=True)
+            elif m_ques:
+                # Número do quesito em negrito; pergunta em normal
+                _run(m_ques.group(1), bold=True)
+                _run(m_ques.group(2))
+            else:
+                _run(s)
 
     # ── Anexos: páginas dos PDFs de avaliação ──────────────────────────────
     if avaliacoes_paths:
@@ -1491,8 +1513,17 @@ class App(ctk.CTk):
                 progress_cb=self._set_sl,
             )
 
+            # Verifica pymupdf antes de tentar anexar PDFs
+            avals_para_anexar = self.avaliacoes_paths or None
+            sem_pymupdf = False
+            if avals_para_anexar and any(p.suffix.lower() == '.pdf' for p in avals_para_anexar):
+                try:
+                    import fitz  # noqa: F401
+                except ImportError:
+                    sem_pymupdf = True
+
             self._set_sl("Salvando .docx...")
-            save_docx(txt, out, avaliacoes_paths=self.avaliacoes_paths or None)
+            save_docx(txt, out, avaliacoes_paths=avals_para_anexar)
 
             self.meu_laudo_path.set(out)
             self.laudo_ref_lbl.configure(
@@ -1501,7 +1532,13 @@ class App(ctk.CTk):
 
             self.prog_laudo.stop()
             self.prog_laudo.set(1)
-            self._set_sl(f"  Salvo: {Path(out).name}", COR_OK)
+            if sem_pymupdf:
+                self._set_sl(
+                    f"  Salvo: {Path(out).name}  ⚠ Execute instalar.bat para ativar anexos PDF",
+                    COR_AVISO,
+                )
+            else:
+                self._set_sl(f"  Salvo: {Path(out).name}", COR_OK)
             self.btn_laudo.configure(state="normal")
 
             pasta_final = Path(out).parent
