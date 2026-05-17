@@ -11,6 +11,8 @@ import base64
 import zipfile
 import re
 import json
+import os
+import subprocess
 from datetime import date
 from pathlib import Path
 import anthropic
@@ -40,6 +42,44 @@ MESES_PT = {
     "July": "julho",      "August": "agosto",       "September": "setembro",
     "October": "outubro", "November": "novembro",   "December": "dezembro",
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# TEMA VISUAL — pensado para uso confortável e alto contraste
+# ───────────────────────────────────────────────────────────────────────────────
+
+COR_FUNDO       = "#eef1f5"   # fundo geral (azul-acinzentado claro)
+COR_FUNDO_HDR   = "#1f3a5c"   # cabeçalho (azul-petróleo profundo)
+COR_FUNDO_CARD  = "#ffffff"   # cartões dos passos
+COR_DESTAQUE    = "#dde4ee"   # caixinha do número do passo
+COR_TEXTO       = "#14171d"   # texto principal (alto contraste)
+COR_TEXTO_FRACO = "#56607a"   # textos auxiliares / status
+COR_ACAO        = "#1f3a5c"   # botões principais
+COR_ACAO_HOVER  = "#162a44"
+COR_SECUNDARIO  = "#3d6aa8"   # botões secundários
+COR_SEC_HOVER   = "#27497f"
+COR_OK          = "#1a6b3a"
+COR_AVISO       = "#a85a00"
+COR_ERRO        = "#a01a1a"
+COR_BORDA       = "#c8d0db"
+COR_OBS_BG      = "#fffef0"   # área de observações
+COR_OBS_BORDA   = "#c8b96a"
+
+FONTE_BASE      = "Segoe UI"
+FONT_TITULO     = (FONTE_BASE, 24, "bold")
+FONT_SUBTITULO  = (FONTE_BASE, 14)
+FONT_PASSO      = (FONTE_BASE, 17, "bold")
+FONT_LABEL      = (FONTE_BASE, 15)
+FONT_ENTRY      = (FONTE_BASE, 15)
+FONT_BTN        = (FONTE_BASE, 15, "bold")
+FONT_BTN_GR     = (FONTE_BASE, 19, "bold")
+FONT_AJUDA      = (FONTE_BASE, 13)
+FONT_AJUDA_SM   = (FONTE_BASE, 12)
+FONT_STATUS     = (FONTE_BASE, 14)
+FONT_PASSO_NUM  = (FONTE_BASE, 22, "bold")
+
+ALTURA_BTN      = 56
+ALTURA_BTN_GR   = 80
+ALTURA_ENTRY    = 48
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UTILITÁRIOS
@@ -198,10 +238,32 @@ def load_reference_laudo() -> str:
                 return txt[:7000]
     return ""
 
+AVALIACAO_KEYWORDS = [
+    "ruido", "ruído",
+    "calor", "ibutg", "temperatur",
+    "vibrac",                    # vibração / vibracao
+    "rni",                       # radiação não ionizante
+    "ltcat", "ppra", "pcmso", "pgr",
+    "dosim",                     # dosimetria
+    "medic", "mediç",            # medição
+    "aval-",                     # "Avaliação-..." (sem casar com 'avaliacao' do pré-laudo)
+    "avaliacao_", "avaliação_",
+    "nho-",                      # NHO-01, NHO-06, NHO-09
+    "agente",                    # "agentes_quimicos", "agente_fisico"
+    "iluminanc",                 # iluminância
+    "quimic",                    # químicos
+]
+DOCX_PDF = {".docx", ".pdf"}
+
+def _eh_avaliacao(nome_lower: str) -> bool:
+    return any(k in nome_lower for k in AVALIACAO_KEYWORDS)
+
+
 def auto_detect(folder: str) -> dict:
     fp = Path(folder)
     r = {"pre_laudo": None, "campo": None,
-         "photos_sub": None, "photo_count": 0, "laudo": None}
+         "photos_sub": None, "photo_count": 0,
+         "laudo": None, "avaliacoes": []}
     for item in fp.iterdir():
         nl = item.name.lower()
         if item.is_dir():
@@ -210,13 +272,16 @@ def auto_detect(folder: str) -> dict:
             if len(fotos) > r["photo_count"]:
                 r["photos_sub"]  = str(item)
                 r["photo_count"] = len(fotos)
-        elif item.is_file() and item.suffix.lower() in {".docx", ".pdf"}:
+        elif item.is_file() and item.suffix.lower() in DOCX_PDF:
             if any(k in nl for k in ["pre-laudo","pre_laudo","prelaudo","preliminar","secretari"]):
                 r["pre_laudo"] = str(item)
             elif any(k in nl for k in ["campo","anotac","diligencia"]):
                 r["campo"] = str(item)
             elif nl.startswith("laudo") and "impugnac" not in nl and "esclar" not in nl:
                 r["laudo"] = str(item)
+            elif _eh_avaliacao(nl):
+                r["avaliacoes"].append(item)
+    r["avaliacoes"].sort(key=lambda p: p.name.lower())
     return r
 
 def output_path(folder: str, prefix: str) -> str:
@@ -226,6 +291,43 @@ def output_path(folder: str, prefix: str) -> str:
         p = Path(folder) / f"{prefix}_{n}.docx"
         n += 1
     return str(p)
+
+def _sanitize_folder_name(name: str) -> str:
+    """Remove caracteres inválidos em nomes de pasta no Windows."""
+    name = re.sub(r'[<>:"/\\|?*\n\r\t]', '', name).strip()
+    name = re.sub(r'\s+', ' ', name)
+    return name[:120].rstrip('. ')
+
+
+def pasta_destino_laudo(processo_folder: str, reclamante: str, reclamada: str) -> Path:
+    """Retorna (e cria) a subpasta '{Reclamante} x {Reclamada}' dentro do processo.
+
+    Se faltarem nomes, devolve a própria pasta do processo (fallback seguro).
+    """
+    base = Path(processo_folder)
+    rec = (reclamante or '').strip()
+    red = (reclamada or '').strip()
+    if not rec and not red:
+        return base
+    if rec and red:
+        sub = f"{rec} x {red}"
+    else:
+        sub = rec or red
+    destino = base / _sanitize_folder_name(sub)
+    destino.mkdir(parents=True, exist_ok=True)
+    return destino
+
+
+def abrir_pasta_no_explorer(path: str | Path) -> None:
+    """Abre o Windows Explorer na pasta indicada."""
+    try:
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    except Exception:
+        try:
+            subprocess.Popen(["explorer", str(path)])
+        except Exception:
+            pass
+
 
 def build_laudo_filename(reclamante: str, reclamada: str,
                           insalubr: bool, periculos: bool, funcao: str) -> str:
@@ -560,34 +662,41 @@ class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent, current_key: str, on_save):
         super().__init__(parent)
         self.title("Configuração da API Anthropic")
-        self.geometry("560x210")
+        self.geometry("640x280")
         self.resizable(False, False)
         self.grab_set()
         self.lift()
+        self.configure(fg_color=COR_FUNDO)
         self.on_save = on_save
 
         ctk.CTkLabel(
             self,
-            text="Para usar o SISTEMA ARI você precisa de uma chave API da Anthropic\n"
-                 "(console.anthropic.com → API Keys).",
-            font=("Arial", 12), justify="left"
-        ).pack(padx=30, pady=(24, 10), anchor="w")
+            text="Chave de API da Anthropic",
+            font=FONT_PASSO, text_color=COR_TEXTO, anchor="w",
+        ).pack(padx=32, pady=(24, 4), anchor="w")
 
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=30, pady=4)
-        ctk.CTkLabel(row, text="Chave API:", font=("Arial", 12),
-                     width=90, anchor="w").pack(side="left")
-        self.entry = ctk.CTkEntry(row, show="•", height=36, font=("Arial", 12))
-        self.entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            self,
+            text="Acesse console.anthropic.com → API Keys e cole a chave abaixo.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO,
+            justify="left", anchor="w",
+        ).pack(padx=32, pady=(0, 14), anchor="w")
+
+        self.entry = ctk.CTkEntry(
+            self, show="•", height=ALTURA_ENTRY, font=FONT_ENTRY,
+            border_color=COR_BORDA, text_color=COR_TEXTO,
+            placeholder_text="sk-ant-…",
+        )
+        self.entry.pack(fill="x", padx=32, pady=(0, 16))
         if current_key:
             self.entry.insert(0, current_key)
 
         ctk.CTkButton(
-            self, text="Salvar e Fechar", height=40,
-            font=("Arial", 13, "bold"),
-            fg_color="#1a3a6b", hover_color="#0f2548",
-            command=self._save
-        ).pack(padx=30, pady=(14, 20), fill="x")
+            self, text="SALVAR E FECHAR", height=ALTURA_BTN,
+            font=FONT_BTN, corner_radius=10,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            command=self._save,
+        ).pack(padx=32, pady=(0, 24), fill="x")
 
     def _save(self):
         k = self.entry.get().strip()
@@ -645,117 +754,133 @@ class App(ctk.CTk):
     def _build_ui(self):
         self.title("SISTEMA ARI — Laudos Periciais")
         self.resizable(True, True)
+        self.configure(fg_color=COR_FUNDO)
 
         # ── Cabeçalho ──────────────────────────────────────────────────────
-        hdr = ctk.CTkFrame(self, fg_color="#1a3a6b", corner_radius=0, height=76)
+        hdr = ctk.CTkFrame(self, fg_color=COR_FUNDO_HDR, corner_radius=0, height=96)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
-        ctk.CTkLabel(
-            hdr,
-            text="  SISTEMA ARI — Laudos Periciais",
-            font=("Arial", 22, "bold"), text_color="white"
-        ).pack(side="left", padx=28, pady=0)
+        hdr_left = ctk.CTkFrame(hdr, fg_color="transparent")
+        hdr_left.pack(side="left", padx=32, fill="y")
 
         ctk.CTkLabel(
-            hdr, text="Ari Vladimir Copesco Junior  |  CREA 060097553-3",
-            font=("Arial", 12), text_color="#a8c4e0"
-        ).pack(side="left", padx=24)
+            hdr_left, text="SISTEMA ARI",
+            font=FONT_TITULO, text_color="white", anchor="w",
+        ).pack(anchor="w", pady=(18, 0))
+        ctk.CTkLabel(
+            hdr_left, text="Laudos Periciais  ·  Ari V. Copesco Jr.  ·  CREA 060097553-3",
+            font=FONT_SUBTITULO, text_color="#b6c4d8", anchor="w",
+        ).pack(anchor="w")
 
         ctk.CTkButton(
-            hdr, text="⚙  Configurar API", width=160, height=38,
-            font=("Arial", 13), fg_color="#2d5fa6", hover_color="#0f2548",
-            command=self._open_settings
-        ).pack(side="right", padx=24)
+            hdr, text="⚙   Configurar API", width=200, height=48,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8, command=self._open_settings,
+        ).pack(side="right", padx=32)
 
         # ── PASSO 1 — Pasta do Processo ────────────────────────────────────
-        p1 = ctk.CTkFrame(self, fg_color="#dce8f5", corner_radius=0)
-        p1.pack(fill="x")
-
-        ctk.CTkLabel(
-            p1, text="  PASSO 1  —  SELECIONE A PASTA DO PROCESSO",
-            font=("Arial", 14, "bold"), text_color="#1a3a6b"
-        ).pack(anchor="w", padx=28, pady=(16, 6))
+        p1 = self._cartao(self, padx=24, pady=(20, 10))
+        self._titulo_passo(p1, "1", "Pasta do Processo",
+                            "Selecione a pasta onde estão o pré-laudo, as fotos e os documentos.")
 
         row = ctk.CTkFrame(p1, fg_color="transparent")
-        row.pack(fill="x", padx=28, pady=(0, 6))
-        ctk.CTkEntry(row, textvariable=self.processo_folder,
-                     height=42, font=("Arial", 13)
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 12))
-        ctk.CTkButton(row, text="Selecionar Pasta", width=170, height=42,
-                      font=("Arial", 13, "bold"),
-                      fg_color="#1a3a6b", hover_color="#0f2548",
-                      command=self._pick_processo).pack(side="right")
+        row.pack(fill="x", padx=24, pady=(4, 8))
+        ctk.CTkEntry(
+            row, textvariable=self.processo_folder,
+            height=ALTURA_ENTRY, font=FONT_ENTRY,
+            border_color=COR_BORDA, text_color=COR_TEXTO,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 12))
+        ctk.CTkButton(
+            row, text="ESCOLHER PASTA", width=220, height=ALTURA_ENTRY,
+            font=FONT_BTN, fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            corner_radius=8, command=self._pick_processo,
+        ).pack(side="right")
 
         self.detect_lbl = ctk.CTkLabel(
-            p1, text="  Selecione a pasta do processo para começar.",
-            font=("Arial", 12), text_color="#666", anchor="w"
+            p1, text="Nenhuma pasta selecionada ainda.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.detect_lbl.pack(fill="x", padx=28, pady=(0, 14))
+        self.detect_lbl.pack(fill="x", padx=24, pady=(0, 18))
 
         # ── IDENTIFICAÇÃO DO PROCESSO ──────────────────────────────────────
-        ident = ctk.CTkFrame(self, fg_color="#eef3fa", corner_radius=0)
-        ident.pack(fill="x")
+        ident = self._cartao(self, padx=24, pady=(0, 10))
+        self._titulo_passo(ident, "2", "Identificação do Processo",
+                            "Será preenchido automaticamente ao escolher o pré-laudo.")
 
-        ctk.CTkLabel(
-            ident, text="  IDENTIFICAÇÃO DO PROCESSO",
-            font=("Arial", 13, "bold"), text_color="#1a3a6b"
-        ).pack(anchor="w", padx=28, pady=(12, 6))
+        # Reclamante (linha cheia)
+        ctk.CTkLabel(ident, text="Reclamante", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w"
+                     ).pack(fill="x", padx=24, pady=(4, 2))
+        ctk.CTkEntry(ident, textvariable=self.reclamante,
+                     height=ALTURA_ENTRY, font=FONT_ENTRY,
+                     border_color=COR_BORDA, text_color=COR_TEXTO,
+                     ).pack(fill="x", padx=24, pady=(0, 8))
 
-        row_nomes = ctk.CTkFrame(ident, fg_color="transparent")
-        row_nomes.pack(fill="x", padx=28, pady=(0, 6))
+        # Reclamada (linha cheia)
+        ctk.CTkLabel(ident, text="Reclamada", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w"
+                     ).pack(fill="x", padx=24, pady=(0, 2))
+        ctk.CTkEntry(ident, textvariable=self.reclamada,
+                     height=ALTURA_ENTRY, font=FONT_ENTRY,
+                     border_color=COR_BORDA, text_color=COR_TEXTO,
+                     ).pack(fill="x", padx=24, pady=(0, 8))
 
-        ctk.CTkLabel(row_nomes, text="Reclamante:", font=("Arial", 12),
-                     width=90, anchor="w").pack(side="left")
-        ctk.CTkEntry(row_nomes, textvariable=self.reclamante,
-                     height=36, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 24))
+        # Função (linha cheia)
+        ctk.CTkLabel(ident, text="Função / Cargo", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w"
+                     ).pack(fill="x", padx=24, pady=(0, 2))
+        ctk.CTkEntry(ident, textvariable=self.funcao,
+                     height=ALTURA_ENTRY, font=FONT_ENTRY,
+                     border_color=COR_BORDA, text_color=COR_TEXTO,
+                     ).pack(fill="x", padx=24, pady=(0, 10))
 
-        ctk.CTkLabel(row_nomes, text="Reclamada:", font=("Arial", 12),
-                     width=85, anchor="w").pack(side="left")
-        ctk.CTkEntry(row_nomes, textvariable=self.reclamada,
-                     height=36, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True)
+        # Tipo
+        ctk.CTkLabel(ident, text="Tipo de Perícia", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w"
+                     ).pack(fill="x", padx=24, pady=(0, 4))
+        row_tipo = ctk.CTkFrame(ident, fg_color="transparent")
+        row_tipo.pack(fill="x", padx=24, pady=(0, 10))
+        ctk.CTkCheckBox(
+            row_tipo, text="  Insalubridade",
+            variable=self.tipo_insalubr,
+            font=FONT_LABEL, text_color=COR_TEXTO,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            checkbox_width=26, checkbox_height=26,
+        ).pack(side="left", padx=(0, 32))
+        ctk.CTkCheckBox(
+            row_tipo, text="  Periculosidade",
+            variable=self.tipo_periculos,
+            font=FONT_LABEL, text_color=COR_TEXTO,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            checkbox_width=26, checkbox_height=26,
+        ).pack(side="left")
 
         self.ident_status = ctk.CTkLabel(
             ident,
-            text="  Os campos serão preenchidos automaticamente ao selecionar o pré-laudo.",
-            font=("Arial", 11), text_color="#888", anchor="w"
+            text="Aguardando seleção do pré-laudo…",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.ident_status.pack(fill="x", padx=28, pady=(0, 4))
-
-        row_tipo = ctk.CTkFrame(ident, fg_color="transparent")
-        row_tipo.pack(fill="x", padx=28, pady=(0, 12))
-
-        ctk.CTkLabel(row_tipo, text="Tipo:", font=("Arial", 12),
-                     width=40, anchor="w").pack(side="left")
-        ctk.CTkCheckBox(row_tipo, text="Insalubridade",
-                        variable=self.tipo_insalubr,
-                        font=("Arial", 12), fg_color="#1a3a6b",
-                        hover_color="#0f2548").pack(side="left", padx=(8, 20))
-        ctk.CTkCheckBox(row_tipo, text="Periculosidade",
-                        variable=self.tipo_periculos,
-                        font=("Arial", 12), fg_color="#1a3a6b",
-                        hover_color="#0f2548").pack(side="left", padx=(0, 32))
-
-        ctk.CTkLabel(row_tipo, text="Função / Cargo:", font=("Arial", 12),
-                     anchor="w").pack(side="left")
-        ctk.CTkEntry(row_tipo, textvariable=self.funcao,
-                     height=36, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True)
+        self.ident_status.pack(fill="x", padx=24, pady=(0, 18))
 
         # ── Abas ────────────────────────────────────────────────────────────
         tabs = ctk.CTkTabview(
-            self, fg_color="#f4f7fb",
-            segmented_button_fg_color="#c8daf0",
-            segmented_button_selected_color="#1a3a6b",
-            segmented_button_selected_hover_color="#0f2548",
-            segmented_button_unselected_color="#c8daf0",
-            segmented_button_unselected_hover_color="#a8c4e0",
+            self, fg_color=COR_FUNDO,
+            segmented_button_fg_color=COR_DESTAQUE,
+            segmented_button_selected_color=COR_ACAO,
+            segmented_button_selected_hover_color=COR_ACAO_HOVER,
+            segmented_button_unselected_color=COR_DESTAQUE,
+            segmented_button_unselected_hover_color="#c5cdd9",
             text_color="white",
-            text_color_disabled="#333",
+            text_color_disabled=COR_TEXTO,
         )
-        tabs.pack(fill="both", expand=True)
+        # Aumenta a altura dos botões do segmento
+        try:
+            tabs._segmented_button.configure(height=52, font=FONT_BTN)
+        except Exception:
+            pass
+
+        tabs.pack(fill="both", expand=True, padx=20, pady=(8, 20))
         tabs.add("   Gerar Laudo Pericial   ")
         tabs.add("   Responder Impugnação / Quesitos   ")
 
@@ -765,187 +890,230 @@ class App(ctk.CTk):
     # ── Aba: Gerar Laudo ─────────────────────────────────────────────────────
 
     def _build_laudo_tab(self, parent):
-        main = ctk.CTkScrollableFrame(parent, fg_color="#f4f7fb")
+        main = ctk.CTkScrollableFrame(parent, fg_color=COR_FUNDO)
         main.pack(fill="both", expand=True)
 
-        # Passo 2 — Pré-laudo
-        self._step(main, "2", "PRÉ-LAUDO  (documento preparado pelas secretárias)")
-        self._file_row(main, self.pre_laudo_path,
+        # Passo 3 — Pré-laudo
+        c3 = self._cartao(main)
+        self._titulo_passo(c3, "3", "Pré-Laudo",
+                            "Documento preparado pelas secretárias.")
+        self._file_row(c3, self.pre_laudo_path,
                        [("Word / PDF", "*.docx *.pdf")],
                        lambda: self.processo_folder.get() or None)
 
-        # Passo 3 — Campo
-        self._step(main, "3", "ANOTAÇÕES DE CAMPO  (dados coletados na diligência)")
-        self._file_row(main, self.campo_path,
+        # Passo 4 — Campo
+        c4 = self._cartao(main)
+        self._titulo_passo(c4, "4", "Anotações de Campo",
+                            "Dados coletados durante a diligência.")
+        self._file_row(c4, self.campo_path,
                        [("Word / PDF", "*.docx *.pdf")],
                        lambda: self.processo_folder.get() or None)
 
-        # Passo 4 — Fotos
-        self._step(main, "4", "FOTOS  (subpasta com as fotos da diligência)")
-        row4 = ctk.CTkFrame(main, fg_color="transparent")
-        row4.pack(fill="x", **PAD)
-        ctk.CTkEntry(row4, textvariable=self.photos_sub,
-                     height=38, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 12))
-        ctk.CTkButton(row4, text="Selecionar Subpasta", width=180, height=38,
-                      fg_color="#2d5fa6", hover_color="#1a3a6b",
-                      command=self._pick_photos_sub).pack(side="right")
+        # Passo 5 — Fotos
+        c5 = self._cartao(main)
+        self._titulo_passo(c5, "5", "Fotos da Diligência",
+                            "Subpasta onde estão as imagens.")
+        row5 = ctk.CTkFrame(c5, fg_color="transparent")
+        row5.pack(fill="x", padx=24, pady=(4, 8))
+        ctk.CTkEntry(
+            row5, textvariable=self.photos_sub,
+            height=ALTURA_ENTRY, font=FONT_ENTRY,
+            border_color=COR_BORDA, text_color=COR_TEXTO,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 12))
+        ctk.CTkButton(
+            row5, text="ESCOLHER SUBPASTA", width=220, height=ALTURA_ENTRY,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8, command=self._pick_photos_sub,
+        ).pack(side="right")
 
         self.photos_lbl = ctk.CTkLabel(
-            main, text="  Nenhuma subpasta selecionada.",
-            font=("Arial", 11), text_color="#777", anchor="w"
+            c5, text="Nenhuma subpasta selecionada.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.photos_lbl.pack(fill="x", padx=30, pady=(0, 4))
+        self.photos_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        # Passo 5 — Avaliações Técnicas
-        self._step(main, "5", "AVALIAÇÕES TÉCNICAS  (relatórios de medição — opcional)")
-        ctk.CTkLabel(
-            main,
-            text="  Relatórios de ruído, vibração, calor, RNI, etc. "
-                 "Serão extraídos e incluídos na elaboração do laudo.",
-            font=("Arial", 12), text_color="#444", anchor="w", wraplength=900, justify="left"
-        ).pack(fill="x", padx=30, pady=(0, 4))
+        # Passo 6 — Avaliações Técnicas
+        c6 = self._cartao(main)
+        self._titulo_passo(c6, "6", "Avaliações Técnicas",
+                            "Detectadas automaticamente na pasta do processo. "
+                            "Use os botões abaixo para incluir/remover manualmente.")
 
-        row5 = ctk.CTkFrame(main, fg_color="transparent")
-        row5.pack(fill="x", padx=30, pady=(0, 4))
-        ctk.CTkButton(row5, text="Adicionar Arquivo(s)", width=185, height=36,
-                      fg_color="#2d5fa6", hover_color="#1a3a6b",
-                      command=self._pick_avaliacoes).pack(side="left", padx=(0, 12))
-        ctk.CTkButton(row5, text="Limpar", width=80, height=36,
-                      fg_color="#888", hover_color="#555",
-                      command=self._clear_avaliacoes).pack(side="left")
+        row6 = ctk.CTkFrame(c6, fg_color="transparent")
+        row6.pack(fill="x", padx=24, pady=(4, 6))
+        ctk.CTkButton(
+            row6, text="ADICIONAR ARQUIVO(S)", width=240, height=ALTURA_BTN - 8,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8, command=self._pick_avaliacoes,
+        ).pack(side="left", padx=(0, 12))
+        ctk.CTkButton(
+            row6, text="LIMPAR", width=120, height=ALTURA_BTN - 8,
+            font=FONT_BTN, fg_color="#7a8190", hover_color="#5a6270",
+            corner_radius=8, command=self._clear_avaliacoes,
+        ).pack(side="left")
 
         self.aval_lbl = ctk.CTkLabel(
-            main, text="  Nenhuma avaliação técnica adicionada.",
-            font=("Arial", 11), text_color="#777", anchor="w"
+            c6, text="Nenhuma avaliação técnica adicionada.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.aval_lbl.pack(fill="x", padx=30, pady=(0, 4))
+        self.aval_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        # Passo 6 — Observações
-        self._step(main, "6", "OBSERVAÇÕES  (informações adicionais para o laudo — opcional)")
-        ctk.CTkLabel(
-            main,
-            text="  Medições realizadas, declarações relevantes, detalhes específicos do caso "
-                 "que devem ser considerados na elaboração:",
-            font=("Arial", 12), text_color="#444", anchor="w", wraplength=900, justify="left"
-        ).pack(fill="x", padx=30, pady=(0, 4))
+        # Passo 7 — Observações
+        c7 = self._cartao(main)
+        self._titulo_passo(c7, "7", "Observações",
+                            "Opcional — instruções, medições ou pontos a destacar.")
+
         self.obs_laudo = ctk.CTkTextbox(
-            main, height=150, font=("Arial", 13),
-            fg_color="#fffef5", border_width=1, border_color="#c8b96a"
+            c7, height=160, font=FONT_ENTRY,
+            fg_color=COR_OBS_BG, border_width=2, border_color=COR_OBS_BORDA,
+            text_color=COR_TEXTO,
         )
-        self.obs_laudo.pack(fill="x", padx=30, pady=(0, 8))
+        self.obs_laudo.pack(fill="x", padx=24, pady=(4, 16))
 
-        # Botão
+        # Botão grande
         self.btn_laudo = ctk.CTkButton(
-            main, text="  GERAR LAUDO PERICIAL", height=64,
-            font=("Arial", 17, "bold"),
-            fg_color="#1a3a6b", hover_color="#0f2548",
-            command=self._start_laudo
+            main, text="▶   GERAR LAUDO PERICIAL", height=ALTURA_BTN_GR,
+            font=FONT_BTN_GR, corner_radius=12,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            command=self._start_laudo,
         )
-        self.btn_laudo.pack(padx=30, pady=(20, 8), fill="x")
+        self.btn_laudo.pack(padx=24, pady=(8, 6), fill="x")
 
-        self.prog_laudo = ctk.CTkProgressBar(main, mode="indeterminate", height=12)
-        self.prog_laudo.pack(padx=30, fill="x")
+        self.prog_laudo = ctk.CTkProgressBar(
+            main, mode="indeterminate", height=16,
+            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
+        )
+        self.prog_laudo.pack(padx=24, fill="x")
         self.prog_laudo.set(0)
 
         self.lbl_laudo = ctk.CTkLabel(
-            main, text="Aguardando...", font=("Arial", 13), text_color="#666"
+            main, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
         )
-        self.lbl_laudo.pack(pady=(8, 28))
+        self.lbl_laudo.pack(pady=(10, 32))
 
     # ── Aba: Responder Impugnação ────────────────────────────────────────────
 
     def _build_resposta_tab(self, parent):
-        main = ctk.CTkScrollableFrame(parent, fg_color="#f4f7fb")
+        main = ctk.CTkScrollableFrame(parent, fg_color=COR_FUNDO)
         main.pack(fill="both", expand=True)
 
-        # Passo 2 — Documento recebido
-        self._step(main, "2", "DOCUMENTO RECEBIDO  (impugnação ou quesitos complementares)")
-        self._file_row(main, self.imp_doc_path,
+        # Passo 3 — Documento recebido
+        c3 = self._cartao(main)
+        self._titulo_passo(c3, "3", "Documento Recebido",
+                            "Impugnação ou quesitos complementares enviados pela parte.")
+        self._file_row(c3, self.imp_doc_path,
                        [("Word / PDF", "*.docx *.pdf")],
                        lambda: self.processo_folder.get() or None)
-        ctk.CTkLabel(
-            main,
-            text="  Faça upload da impugnação recebida ou dos quesitos complementares.\n"
-                 "  O app identifica o tipo automaticamente e gera a resposta no estilo do Ari.",
-            font=("Arial", 12), text_color="#444", anchor="w", justify="left"
-        ).pack(fill="x", padx=30, pady=(0, 6))
 
-        # Passo 3 — Meu laudo
-        self._step(main, "3", "MEU LAUDO  (referência para a defesa das conclusões)")
-        row3 = ctk.CTkFrame(main, fg_color="transparent")
-        row3.pack(fill="x", **PAD)
-        ctk.CTkEntry(row3, textvariable=self.meu_laudo_path,
-                     height=38, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 12))
-        ctk.CTkButton(row3, text="Selecionar", width=140, height=38,
-                      fg_color="#2d5fa6", hover_color="#1a3a6b",
-                      command=lambda: self._pick_file(
-                          self.meu_laudo_path,
-                          [("Word / PDF", "*.docx *.pdf")],
-                          self.processo_folder.get() or None)
-                      ).pack(side="right")
+        # Passo 4 — Meu laudo
+        c4 = self._cartao(main)
+        self._titulo_passo(c4, "4", "Meu Laudo",
+                            "Laudo original (referência para defender as conclusões).")
+        row4 = ctk.CTkFrame(c4, fg_color="transparent")
+        row4.pack(fill="x", padx=24, pady=(4, 6))
+        ctk.CTkEntry(
+            row4, textvariable=self.meu_laudo_path,
+            height=ALTURA_ENTRY, font=FONT_ENTRY,
+            border_color=COR_BORDA, text_color=COR_TEXTO,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 12))
+        ctk.CTkButton(
+            row4, text="ESCOLHER ARQUIVO", width=220, height=ALTURA_ENTRY,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8,
+            command=lambda: self._pick_file(
+                self.meu_laudo_path,
+                [("Word / PDF", "*.docx *.pdf")],
+                self.processo_folder.get() or None),
+        ).pack(side="right")
 
         self.laudo_ref_lbl = ctk.CTkLabel(
-            main,
-            text="  Auto-detectado ao selecionar a pasta do processo.",
-            font=("Arial", 11), text_color="#777", anchor="w"
+            c4,
+            text="Auto-detectado ao selecionar a pasta do processo.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.laudo_ref_lbl.pack(fill="x", padx=30, pady=(0, 6))
+        self.laudo_ref_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        # Passo 4 — Observações
-        self._step(main, "4", "OBSERVAÇÕES  (pontos específicos a destacar na resposta — opcional)")
-        ctk.CTkLabel(
-            main,
-            text="  Instruções específicas, argumentos técnicos adicionais ou "
-                 "detalhes sobre a impugnação que devem ser considerados:",
-            font=("Arial", 12), text_color="#444", anchor="w", wraplength=900, justify="left"
-        ).pack(fill="x", padx=30, pady=(0, 4))
+        # Passo 5 — Observações
+        c5 = self._cartao(main)
+        self._titulo_passo(c5, "5", "Observações",
+                            "Opcional — pontos específicos a destacar na resposta.")
         self.obs_resp = ctk.CTkTextbox(
-            main, height=150, font=("Arial", 13),
-            fg_color="#fffef5", border_width=1, border_color="#c8b96a"
+            c5, height=160, font=FONT_ENTRY,
+            fg_color=COR_OBS_BG, border_width=2, border_color=COR_OBS_BORDA,
+            text_color=COR_TEXTO,
         )
-        self.obs_resp.pack(fill="x", padx=30, pady=(0, 8))
+        self.obs_resp.pack(fill="x", padx=24, pady=(4, 16))
 
-        # Botão
+        # Botão grande
         self.btn_resp = ctk.CTkButton(
-            main, text="  GERAR RESPOSTA / ESCLARECIMENTOS", height=64,
-            font=("Arial", 17, "bold"),
-            fg_color="#1a3a6b", hover_color="#0f2548",
-            command=self._start_resposta
+            main, text="▶   GERAR RESPOSTA / ESCLARECIMENTOS",
+            height=ALTURA_BTN_GR, font=FONT_BTN_GR, corner_radius=12,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            command=self._start_resposta,
         )
-        self.btn_resp.pack(padx=30, pady=(20, 8), fill="x")
+        self.btn_resp.pack(padx=24, pady=(8, 6), fill="x")
 
-        self.prog_resp = ctk.CTkProgressBar(main, mode="indeterminate", height=12)
-        self.prog_resp.pack(padx=30, fill="x")
+        self.prog_resp = ctk.CTkProgressBar(
+            main, mode="indeterminate", height=16,
+            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
+        )
+        self.prog_resp.pack(padx=24, fill="x")
         self.prog_resp.set(0)
 
         self.lbl_resp = ctk.CTkLabel(
-            main, text="Aguardando...", font=("Arial", 13), text_color="#666"
+            main, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
         )
-        self.lbl_resp.pack(pady=(8, 28))
+        self.lbl_resp.pack(pady=(10, 32))
 
     # ── Helpers de UI ────────────────────────────────────────────────────────
 
-    def _step(self, parent, num: str, title: str):
-        fr = ctk.CTkFrame(parent, fg_color="#c8daf0", corner_radius=7, height=38)
-        fr.pack(fill="x", padx=30, pady=(18, 5))
-        fr.pack_propagate(False)
+    def _cartao(self, parent, padx=24, pady=(0, 12)):
+        """Cartão branco com borda suave que agrupa um passo do fluxo."""
+        card = ctk.CTkFrame(
+            parent, fg_color=COR_FUNDO_CARD, corner_radius=12,
+            border_width=1, border_color=COR_BORDA,
+        )
+        card.pack(fill="x", padx=padx, pady=pady)
+        return card
+
+    def _titulo_passo(self, parent, num: str, titulo: str, ajuda: str = ""):
+        """Cabeçalho de cartão: bolinha azul com número + título + descrição."""
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.pack(fill="x", padx=24, pady=(18, 6))
+
+        bola = ctk.CTkFrame(
+            wrap, fg_color=COR_ACAO, corner_radius=22, width=44, height=44,
+        )
+        bola.pack(side="left", padx=(0, 16))
+        bola.pack_propagate(False)
         ctk.CTkLabel(
-            fr, text=f"   PASSO {num}  —  {title}",
-            font=("Arial", 13, "bold"), text_color="#1a3a6b", anchor="w"
-        ).pack(side="left", padx=14)
+            bola, text=num, font=FONT_PASSO_NUM, text_color="white",
+        ).pack(expand=True)
+
+        txt = ctk.CTkFrame(wrap, fg_color="transparent")
+        txt.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            txt, text=titulo, font=FONT_PASSO, text_color=COR_TEXTO, anchor="w",
+        ).pack(anchor="w")
+        if ajuda:
+            ctk.CTkLabel(
+                txt, text=ajuda, font=FONT_AJUDA, text_color=COR_TEXTO_FRACO,
+                anchor="w", justify="left",
+            ).pack(anchor="w", pady=(2, 0))
 
     def _file_row(self, parent, var, filetypes, get_dir=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", **PAD)
-        ctk.CTkEntry(row, textvariable=var, height=38, font=("Arial", 12)
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 12))
+        row.pack(fill="x", padx=24, pady=(4, 14))
+        ctk.CTkEntry(
+            row, textvariable=var,
+            height=ALTURA_ENTRY, font=FONT_ENTRY,
+            border_color=COR_BORDA, text_color=COR_TEXTO,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 12))
         ctk.CTkButton(
-            row, text="Selecionar Arquivo", width=170, height=38,
-            fg_color="#2d5fa6", hover_color="#1a3a6b",
+            row, text="ESCOLHER ARQUIVO", width=220, height=ALTURA_ENTRY,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8,
             command=lambda: self._pick_file(var, filetypes,
-                                            get_dir() if get_dir else None)
+                                            get_dir() if get_dir else None),
         ).pack(side="right")
 
     def _pick_file(self, var, filetypes, initial_dir=None):
@@ -970,25 +1138,31 @@ class App(ctk.CTk):
             self.photos_list = get_photos(det["photos_sub"])
             n = min(det["photo_count"], MAX_PHOTOS)
             self.photos_lbl.configure(
-                text=f"  {n} foto(s) na subpasta '{Path(det['photos_sub']).name}'.",
-                text_color="#1a6b1a"
+                text=f"✓  {n} foto(s) na subpasta '{Path(det['photos_sub']).name}'.",
+                text_color=COR_OK,
             )
         if det["laudo"]:
             self.meu_laudo_path.set(det["laudo"])
             self.laudo_ref_lbl.configure(
-                text=f"  Detectado: {Path(det['laudo']).name}",
-                text_color="#1a6b1a"
+                text=f"✓  Detectado: {Path(det['laudo']).name}",
+                text_color=COR_OK,
             )
 
+        if det["avaliacoes"]:
+            # Substitui a lista (não acumula com seleções anteriores).
+            self.avaliacoes_paths = list(det["avaliacoes"])
+            self._update_aval_label()
+
         partes = [
-            "Pré-laudo: " + ("✓" if det["pre_laudo"] else "não encontrado"),
-            "Campo: "     + ("✓" if det["campo"]     else "não encontrado"),
+            "Pré-laudo: " + ("✓" if det["pre_laudo"] else "—"),
+            "Campo: "     + ("✓" if det["campo"]     else "—"),
             f"Fotos: {min(det['photo_count'], MAX_PHOTOS)}" if det["photo_count"] else "Fotos: —",
-            "Laudo anterior: " + ("✓" if det["laudo"] else "nenhum"),
+            "Laudo anterior: " + ("✓" if det["laudo"] else "—"),
+            f"Avaliações: {len(det['avaliacoes'])}" if det["avaliacoes"] else "Avaliações: —",
         ]
         self.detect_lbl.configure(
-            text="  " + "   |   ".join(partes),
-            text_color="#1a3a6b"
+            text="   ".join(partes),
+            text_color=COR_TEXTO,
         )
 
     def _pick_photos_sub(self):
@@ -1001,9 +1175,10 @@ class App(ctk.CTk):
         self.photos_list = get_photos(folder)
         n = len(self.photos_list)
         self.photos_lbl.configure(
-            text=f"  {n} foto(s) encontrada(s)."
-                 + (f"  (limite {MAX_PHOTOS} ativas)" if n >= MAX_PHOTOS else ""),
-            text_color="#1a6b1a" if n else "#b05000"
+            text=(f"✓  {n} foto(s) encontrada(s)."
+                  + (f"  (limite {MAX_PHOTOS} ativas)" if n >= MAX_PHOTOS else "")
+                  if n else "⚠  Nenhuma foto encontrada nesta subpasta."),
+            text_color=COR_OK if n else COR_AVISO,
         )
 
     def _pick_avaliacoes(self):
@@ -1028,22 +1203,23 @@ class App(ctk.CTk):
         n = len(self.avaliacoes_paths)
         if n == 0:
             self.aval_lbl.configure(
-                text="  Nenhuma avaliação técnica adicionada.", text_color="#777"
+                text="Nenhuma avaliação técnica adicionada.",
+                text_color=COR_TEXTO_FRACO,
             )
         else:
             names = ", ".join(p.name for p in self.avaliacoes_paths[:3])
             if n > 3:
                 names += f" (+{n - 3})"
             self.aval_lbl.configure(
-                text=f"  {n} arquivo(s): {names}", text_color="#1a6b1a"
+                text=f"✓  {n} arquivo(s): {names}", text_color=COR_OK,
             )
 
-    def _set_sl(self, msg, color="#555"):
-        self.lbl_laudo.configure(text=msg, text_color=color)
+    def _set_sl(self, msg, color=None):
+        self.lbl_laudo.configure(text=msg, text_color=color or COR_TEXTO_FRACO)
         self.update_idletasks()
 
-    def _set_sr(self, msg, color="#555"):
-        self.lbl_resp.configure(text=msg, text_color=color)
+    def _set_sr(self, msg, color=None):
+        self.lbl_resp.configure(text=msg, text_color=color or COR_TEXTO_FRACO)
         self.update_idletasks()
 
     def _open_settings(self):
@@ -1075,21 +1251,35 @@ class App(ctk.CTk):
         if data.get('funcao'):
             self.funcao.set(data['funcao'])
             filled.append('Função')
-        if 'insalubr' in data:
-            self.tipo_insalubr.set(data['insalubr'])
-        if 'periculos' in data:
-            self.tipo_periculos.set(data['periculos'])
+        tem_insalubr  = 'insalubr'  in data
+        tem_periculos = 'periculos' in data
+        if tem_insalubr or tem_periculos:
+            # Se o pré-laudo informou algo sobre o tipo, sobrescreve os defaults
+            # (evita o bug de insalubridade ficar marcada quando só há periculosidade).
+            insalubr  = bool(data.get('insalubr',  False))
+            periculos = bool(data.get('periculos', False))
+            if not insalubr and not periculos:
+                # Pré-laudo não diz nada claro — mantém insalubridade como default.
+                insalubr = True
+            self.tipo_insalubr.set(insalubr)
+            self.tipo_periculos.set(periculos)
+            if insalubr and periculos:
+                filled.append('Tipo: Insalubr. + Periculos.')
+            elif insalubr:
+                filled.append('Tipo: Insalubridade')
+            elif periculos:
+                filled.append('Tipo: Periculosidade')
 
         if filled:
             self.ident_status.configure(
-                text=f"  Extraído automaticamente: {', '.join(filled)}  "
+                text=f"✓  Extraído automaticamente: {', '.join(filled)}  "
                      f"(a partir de '{Path(path).name}')",
-                text_color="#1a6b1a"
+                text_color=COR_OK,
             )
         else:
             self.ident_status.configure(
-                text="  Não foi possível extrair dados automaticamente. Preencha manualmente.",
-                text_color="#b05000"
+                text="⚠  Não foi possível extrair dados automaticamente. Preencha manualmente.",
+                text_color=COR_AVISO,
             )
 
     # ── Gerar Laudo ──────────────────────────────────────────────────────────
@@ -1109,7 +1299,7 @@ class App(ctk.CTk):
             return
         self.btn_laudo.configure(state="disabled")
         self.prog_laudo.start()
-        self._set_sl("Iniciando...", "#1a3a6b")
+        self._set_sl("Iniciando...", COR_ACAO)
         threading.Thread(target=self._laudo_thread, daemon=True).start()
 
     def _laudo_thread(self):
@@ -1138,7 +1328,11 @@ class App(ctk.CTk):
                 self.tipo_insalubr.get(), self.tipo_periculos.get(),
                 self.funcao.get()
             )
-            out = output_path(self.processo_folder.get(), fname)
+            destino = pasta_destino_laudo(
+                self.processo_folder.get(),
+                self.reclamante.get(), self.reclamada.get()
+            )
+            out = output_path(str(destino), fname)
 
             txt = gerar_laudo(
                 api_key=self.api_key, pre_laudo=pre, campo=camp,
@@ -1152,28 +1346,34 @@ class App(ctk.CTk):
 
             self.meu_laudo_path.set(out)
             self.laudo_ref_lbl.configure(
-                text=f"  {Path(out).name}  (gerado agora)", text_color="#1a6b1a"
+                text=f"  {Path(out).name}  (gerado agora)", text_color=COR_OK
             )
 
             self.prog_laudo.stop()
             self.prog_laudo.set(1)
-            self._set_sl(f"  Salvo: {Path(out).name}", "#1a6b1a")
+            self._set_sl(f"  Salvo: {Path(out).name}", COR_OK)
             self.btn_laudo.configure(state="normal")
-            messagebox.showinfo(
-                "Concluído",
-                f"Laudo gerado com sucesso!\n\n"
-                f"Arquivo: {Path(out).name}\nPasta: {self.processo_folder.get()}"
+
+            pasta_final = Path(out).parent
+            abrir = messagebox.askyesno(
+                "Laudo gerado!",
+                f"Laudo salvo com sucesso!\n\n"
+                f"Arquivo: {Path(out).name}\n"
+                f"Pasta: {pasta_final}\n\n"
+                f"Deseja abrir a pasta agora?"
             )
+            if abrir:
+                abrir_pasta_no_explorer(pasta_final)
         except anthropic.AuthenticationError:
             self.prog_laudo.stop()
             self.btn_laudo.configure(state="normal")
-            self._set_sl("  Chave API inválida.", "red")
+            self._set_sl("  Chave API inválida.", COR_ERRO)
             messagebox.showerror("Erro de autenticação",
                                  "Chave API inválida.\nClique em ⚙ Configurar API.")
         except Exception as e:
             self.prog_laudo.stop()
             self.btn_laudo.configure(state="normal")
-            self._set_sl(f"  Erro: {e}", "red")
+            self._set_sl(f"  Erro: {e}", COR_ERRO)
             messagebox.showerror("Erro", f"Ocorreu um erro:\n\n{e}")
 
     # ── Gerar Resposta ───────────────────────────────────────────────────────
@@ -1191,7 +1391,7 @@ class App(ctk.CTk):
             return
         self.btn_resp.configure(state="disabled")
         self.prog_resp.start()
-        self._set_sr("Iniciando...", "#1a3a6b")
+        self._set_sr("Iniciando...", COR_ACAO)
         threading.Thread(target=self._resposta_thread, daemon=True).start()
 
     def _resposta_thread(self):
@@ -1220,7 +1420,7 @@ class App(ctk.CTk):
 
             self.prog_resp.stop()
             self.prog_resp.set(1)
-            self._set_sr(f"  Salvo: {Path(out).name}", "#1a6b1a")
+            self._set_sr(f"  Salvo: {Path(out).name}", COR_OK)
             self.btn_resp.configure(state="normal")
             messagebox.showinfo(
                 "Concluído",
@@ -1230,13 +1430,13 @@ class App(ctk.CTk):
         except anthropic.AuthenticationError:
             self.prog_resp.stop()
             self.btn_resp.configure(state="normal")
-            self._set_sr("  Chave API inválida.", "red")
+            self._set_sr("  Chave API inválida.", COR_ERRO)
             messagebox.showerror("Erro de autenticação",
                                  "Chave API inválida.\nClique em ⚙ Configurar API.")
         except Exception as e:
             self.prog_resp.stop()
             self.btn_resp.configure(state="normal")
-            self._set_sr(f"  Erro: {e}", "red")
+            self._set_sr(f"  Erro: {e}", COR_ERRO)
             messagebox.showerror("Erro", f"Ocorreu um erro:\n\n{e}")
 
 
