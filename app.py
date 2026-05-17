@@ -496,13 +496,13 @@ def _add_docx_header_footer(sec):
     for i, line in enumerate(footer_lines):
         p = ftr.paragraphs[0] if i == 0 else ftr.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(0)
+        p.paragraph_format.line_spacing = Pt(11)
         run = p.add_run(line)
         run.font.name = "Arial"
         run.font.size = Pt(10)
         run.font.italic = True
-
-    # Parágrafo final vazio
-    ftr.add_paragraph()
 
 
 def save_docx(text: str, out: str):
