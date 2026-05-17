@@ -124,27 +124,45 @@ def _extract_docx_lines(path: str) -> str:
     except Exception:
         return ""
 
+def _extrair_partes_do_nome(nome: str) -> dict:
+    """Tenta extrair 'Reclamante x Reclamada' de um nome de arquivo ou pasta."""
+    # Remove prefixos comuns de documentos
+    clean = re.sub(
+        r'(?i)^\s*(?:pr[eé][\-_\s]*laudo|pre[\-_]?laudo|laudo|campo|'
+        r'anota\w*|dilig\w*|secretar\w*|processo)\s*[\-_]?\s*',
+        '', nome
+    ).strip()
+    m = re.match(r'^(.+?)\s+[xX]\s+(.+)$', clean)
+    if m:
+        return {'reclamante': m.group(1).strip(), 'reclamada': m.group(2).strip()}
+    return {}
+
+
+def _extrair_campo(texto: str, label: str) -> str:
+    """Extrai o valor de um campo 'Label: valor' ou 'Label valor' no texto."""
+    # Tenta com dois pontos: "Reclamante: Fulano"
+    m = re.search(rf'(?i){label}\s*[:\-]\s*(.+)', texto)
+    if m:
+        val = m.group(1).split('\n')[0]
+        val = re.split(r'\s{3,}|\t|\|', val)[0].strip()
+        val = re.sub(r'\s+', ' ', val).strip()
+        if 3 <= len(val) <= 120:
+            return val
+    return ''
+
+
 def parse_processo(path: str) -> dict:
     """
-    Extrai Reclamante, Reclamada, Função e tipo do arquivo enviado.
-    Tenta primeiro o nome do arquivo, depois o conteúdo.
-    Retorna dict com chaves: reclamante, reclamada, funcao, insalubr, periculos.
+    Extrai Reclamante, Reclamada, Função e tipo de um arquivo (.docx/.pdf).
+    Tenta: (1) nome do arquivo, (2) conteúdo do documento.
     """
     data = {}
 
-    # ── 1. Tenta o nome do arquivo ─────────────────────────────────────────
-    stem = Path(path).stem
-    clean = re.sub(
-        r'(?i)^\s*(?:pr[eé][\-_\s]*laudo|pre[\-_]?laudo|laudo|campo|'
-        r'anota\w*|dilig\w*|secretar\w*)\s*[\-_]?\s*',
-        '', stem
-    ).strip()
-    m_file = re.match(r'^(.+?)\s+[xX]\s+(.+)$', clean)
-    if m_file:
-        data['reclamante'] = m_file.group(1).strip()
-        data['reclamada']  = m_file.group(2).strip()
+    # ── 1. Nome do arquivo ─────────────────────────────────────────────────
+    partes = _extrair_partes_do_nome(Path(path).stem)
+    data.update(partes)
 
-    # ── 2. Lê o conteúdo ───────────────────────────────────────────────────
+    # ── 2. Conteúdo do documento ───────────────────────────────────────────
     ext = Path(path).suffix.lower()
     if ext == '.docx':
         text = _extract_docx_lines(path)
@@ -157,26 +175,54 @@ def parse_processo(path: str) -> dict:
         return data
 
     for label, key in [('Reclamante', 'reclamante'), ('Reclamada', 'reclamada')]:
-        if key in data:
-            continue
-        m = re.search(rf'(?i){label}\s*[:\-]?\s*(.+)', text)
-        if m:
-            val = m.group(1).split('\n')[0]
-            val = re.split(r'\s{3,}|\t|\|', val)[0].strip()
-            val = re.sub(r'\s+', ' ', val).strip()
-            if 3 <= len(val) <= 100:
+        if key not in data:
+            val = _extrair_campo(text, label)
+            if val:
                 data[key] = val
 
-    m = re.search(r'(?i)(?:fun[çc][ãa]o|cargo)\s*[:\-/]?\s*(.+)', text)
-    if m:
-        val = m.group(1).split('\n')[0]
-        val = re.split(r'\s{3,}|\t|\|', val)[0].strip()
-        val = re.sub(r'\s+', ' ', val).strip()
-        if 3 <= len(val) <= 80:
-            data['funcao'] = val
+    if 'funcao' not in data:
+        for label in [r'Fun[çc][ãa]o', 'Cargo', r'Fun[çc][ãa]o\s*/\s*Cargo']:
+            val = _extrair_campo(text, label)
+            if val:
+                data['funcao'] = val
+                break
 
     data['insalubr']  = bool(re.search(r'(?i)insalubr',    text))
     data['periculos'] = bool(re.search(r'(?i)periculosid', text))
+
+    return data
+
+
+def parse_processo_da_pasta(folder: str, det: dict) -> dict:
+    """
+    Extrai dados do processo combinando: nome da pasta → pré-laudo → campo.
+    det é o resultado de auto_detect().
+    """
+    data = {}
+
+    # 1. Nome da pasta do processo
+    partes = _extrair_partes_do_nome(Path(folder).name)
+    data.update(partes)
+
+    # 2. Pré-laudo (arquivo mais confiável para dados estruturados)
+    if det.get('pre_laudo') and not (data.get('reclamante') and data.get('reclamada')):
+        try:
+            d = parse_processo(det['pre_laudo'])
+            for k, v in d.items():
+                if k not in data or not data[k]:
+                    data[k] = v
+        except Exception:
+            pass
+
+    # 3. Campo (complementar)
+    if det.get('campo') and not (data.get('reclamante') and data.get('reclamada')):
+        try:
+            d = parse_processo(det['campo'])
+            for k, v in d.items():
+                if k not in data or not data[k]:
+                    data[k] = v
+        except Exception:
+            pass
 
     return data
 
@@ -737,7 +783,9 @@ class App(ctk.CTk):
         self.imp_doc_path   = ctk.StringVar()
         self.meu_laudo_path = ctk.StringVar()
 
-        # Auto-preenchimento ao selecionar documentos
+        self._pausar_trace = False
+
+        # Auto-preenchimento ao selecionar documentos manualmente
         self.pre_laudo_path.trace_add('write', self._on_doc_changed)
         self.campo_path.trace_add('write', self._on_doc_changed)
 
@@ -890,33 +938,16 @@ class App(ctk.CTk):
     # ── Aba: Gerar Laudo ─────────────────────────────────────────────────────
 
     def _build_laudo_tab(self, parent):
-        # ── Rodapé fixo com botão (sempre visível) — empacotado ANTES do scroll ──
-        bottom = ctk.CTkFrame(parent, fg_color=COR_FUNDO, corner_radius=0)
-        bottom.pack(fill="x", side="bottom", padx=0, pady=0)
+        # Wrapper com grid: linha 0 = scroll (expande), linha 1 = botão fixo
+        wrapper = ctk.CTkFrame(parent, fg_color=COR_FUNDO, corner_radius=0)
+        wrapper.pack(fill="both", expand=True)
+        wrapper.grid_rowconfigure(0, weight=1)
+        wrapper.grid_rowconfigure(1, weight=0)
+        wrapper.grid_columnconfigure(0, weight=1)
 
-        self.btn_laudo = ctk.CTkButton(
-            bottom, text="▶   GERAR LAUDO PERICIAL", height=ALTURA_BTN_GR,
-            font=FONT_BTN_GR, corner_radius=12,
-            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-            command=self._start_laudo,
-        )
-        self.btn_laudo.pack(padx=24, pady=(10, 4), fill="x")
-
-        self.prog_laudo = ctk.CTkProgressBar(
-            bottom, mode="indeterminate", height=14,
-            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
-        )
-        self.prog_laudo.pack(padx=24, fill="x")
-        self.prog_laudo.set(0)
-
-        self.lbl_laudo = ctk.CTkLabel(
-            bottom, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
-        )
-        self.lbl_laudo.pack(pady=(4, 10))
-
-        # ── Área rolável com os passos ─────────────────────────────────────────
-        main = ctk.CTkScrollableFrame(parent, fg_color=COR_FUNDO)
-        main.pack(fill="both", expand=True)
+        # ── Área rolável com os passos ──────────────────────────────────────
+        main = ctk.CTkScrollableFrame(wrapper, fg_color=COR_FUNDO)
+        main.grid(row=0, column=0, sticky="nsew")
 
         # Passo 3 — Pré-laudo
         c3 = self._cartao(main)
@@ -993,6 +1024,31 @@ class App(ctk.CTk):
             text_color=COR_TEXTO,
         )
         self.obs_laudo.pack(fill="x", padx=24, pady=(4, 16))
+
+        # ── Botão fixo (linha 1 do grid — sempre visível) ──────────────────
+        bottom = ctk.CTkFrame(wrapper, fg_color=COR_FUNDO, corner_radius=0)
+        bottom.grid(row=1, column=0, sticky="ew")
+
+        self.btn_laudo = ctk.CTkButton(
+            bottom, text="▶   GERAR LAUDO PERICIAL", height=ALTURA_BTN_GR,
+            font=FONT_BTN_GR, corner_radius=12,
+            fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
+            command=self._start_laudo,
+        )
+        self.btn_laudo.pack(fill="x", padx=24, pady=(10, 4))
+
+        self.prog_laudo = ctk.CTkProgressBar(
+            bottom, mode="indeterminate", height=14,
+            fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
+        )
+        self.prog_laudo.pack(fill="x", padx=24)
+        self.prog_laudo.set(0)
+
+        self.lbl_laudo = ctk.CTkLabel(
+            bottom, text="Pronto para gerar.",
+            font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
+        )
+        self.lbl_laudo.pack(pady=(4, 10))
 
     # ── Aba: Responder Impugnação ────────────────────────────────────────────
 
@@ -1133,10 +1189,16 @@ class App(ctk.CTk):
         self.processo_folder.set(folder)
         det = auto_detect(folder)
 
+        # ── Preenche caminhos detectados ───────────────────────────────────
+        # Desativa trace temporariamente para não disparar _on_doc_changed
+        # antes de termos todos os dados da pasta.
+        self._pausar_trace = True
         if det["pre_laudo"]:
             self.pre_laudo_path.set(det["pre_laudo"])
         if det["campo"]:
             self.campo_path.set(det["campo"])
+        self._pausar_trace = False
+
         if det["photos_sub"]:
             self.photos_sub.set(det["photos_sub"])
             self.photos_list = get_photos(det["photos_sub"])
@@ -1151,9 +1213,7 @@ class App(ctk.CTk):
                 text=f"✓  Detectado: {Path(det['laudo']).name}",
                 text_color=COR_OK,
             )
-
         if det["avaliacoes"]:
-            # Substitui a lista (não acumula com seleções anteriores).
             self.avaliacoes_paths = list(det["avaliacoes"])
             self._update_aval_label()
 
@@ -1168,6 +1228,9 @@ class App(ctk.CTk):
             text="   ".join(partes),
             text_color=COR_TEXTO,
         )
+
+        # ── Lê dados do processo (pasta + documentos) ──────────────────────
+        self._auto_fill_identificacao(folder, det)
 
     def _pick_photos_sub(self):
         folder = filedialog.askdirectory(
@@ -1235,15 +1298,22 @@ class App(ctk.CTk):
         save_config(self.config_data)
 
     def _on_doc_changed(self, *_):
-        """Chamado quando pré-laudo ou campo é alterado — tenta auto-preencher identificação."""
-        # Prioridade: pré-laudo > campo
-        path = self.pre_laudo_path.get() or self.campo_path.get()
-        if not path or not Path(path).is_file():
+        """Chamado pelo trace quando pré-laudo ou campo é trocado manualmente."""
+        if getattr(self, '_pausar_trace', False):
             return
+        folder = self.processo_folder.get()
+        det = {
+            'pre_laudo': self.pre_laudo_path.get() or None,
+            'campo':     self.campo_path.get() or None,
+        }
+        self._auto_fill_identificacao(folder or '', det)
+
+    def _auto_fill_identificacao(self, folder: str, det: dict):
+        """Extrai e preenche Reclamante, Reclamada, Função e tipo."""
         try:
-            data = parse_processo(path)
+            data = parse_processo_da_pasta(folder, det)
         except Exception:
-            return
+            data = {}
 
         filled = []
         if data.get('reclamante'):
@@ -1255,34 +1325,35 @@ class App(ctk.CTk):
         if data.get('funcao'):
             self.funcao.set(data['funcao'])
             filled.append('Função')
-        tem_insalubr  = 'insalubr'  in data
-        tem_periculos = 'periculos' in data
-        if tem_insalubr or tem_periculos:
-            # Se o pré-laudo informou algo sobre o tipo, sobrescreve os defaults
-            # (evita o bug de insalubridade ficar marcada quando só há periculosidade).
-            insalubr  = bool(data.get('insalubr',  False))
-            periculos = bool(data.get('periculos', False))
-            if not insalubr and not periculos:
-                # Pré-laudo não diz nada claro — mantém insalubridade como default.
-                insalubr = True
-            self.tipo_insalubr.set(insalubr)
-            self.tipo_periculos.set(periculos)
-            if insalubr and periculos:
-                filled.append('Tipo: Insalubr. + Periculos.')
-            elif insalubr:
-                filled.append('Tipo: Insalubridade')
-            elif periculos:
-                filled.append('Tipo: Periculosidade')
+
+        insalubr  = bool(data.get('insalubr',  False))
+        periculos = bool(data.get('periculos', False))
+        if not insalubr and not periculos:
+            insalubr = True   # default: insalubridade
+        self.tipo_insalubr.set(insalubr)
+        self.tipo_periculos.set(periculos)
+        if insalubr or periculos:
+            tipo = ' + '.join(filter(None, [
+                'Insalubr.' if insalubr else '',
+                'Periculos.' if periculos else '',
+            ]))
+            filled.append(f'Tipo: {tipo}')
+
+        origem = ''
+        if det.get('pre_laudo'):
+            origem = Path(det['pre_laudo']).name
+        elif folder:
+            origem = Path(folder).name
 
         if filled:
             self.ident_status.configure(
-                text=f"✓  Extraído automaticamente: {', '.join(filled)}  "
-                     f"(a partir de '{Path(path).name}')",
+                text=f"✓  Preenchido automaticamente: {', '.join(filled)}"
+                     + (f"  —  {origem}" if origem else ""),
                 text_color=COR_OK,
             )
         else:
             self.ident_status.configure(
-                text="⚠  Não foi possível extrair dados automaticamente. Preencha manualmente.",
+                text="⚠  Não foi possível extrair dados. Preencha manualmente.",
                 text_color=COR_AVISO,
             )
 
