@@ -469,8 +469,46 @@ def _is_header(line: str) -> bool:
             return True
     return any(u == h.upper() or u.startswith(h.upper()) for h in SECTION_HEADERS)
 
+def _footer_add_page_number(paragraph):
+    """Insere campo PAGE no parágrafo do rodapé: — X —"""
+    def _field_run(fld_type=None, instr=None):
+        r = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        rf = OxmlElement('w:rFonts')
+        rf.set(qn('w:ascii'), 'Arial')
+        rf.set(qn('w:hAnsi'), 'Arial')
+        rPr.append(rf)
+        sz = OxmlElement('w:sz')
+        sz.set(qn('w:val'), '18')  # 9pt = 18 half-points
+        rPr.append(sz)
+        rPr.append(OxmlElement('w:i'))
+        r.append(rPr)
+        if fld_type:
+            fc = OxmlElement('w:fldChar')
+            fc.set(qn('w:fldCharType'), fld_type)
+            r.append(fc)
+        if instr:
+            it = OxmlElement('w:instrText')
+            it.set(qn('xml:space'), 'preserve')
+            it.text = instr
+            r.append(it)
+        return r
+
+    def _txt(txt):
+        run = paragraph.add_run(txt)
+        run.font.name  = "Arial"
+        run.font.size  = Pt(9)
+        run.font.italic = True
+
+    _txt(" — ")
+    paragraph._p.append(_field_run(fld_type='begin'))
+    paragraph._p.append(_field_run(instr=' PAGE '))
+    paragraph._p.append(_field_run(fld_type='end'))
+    _txt(" —")
+
+
 def _add_docx_header_footer(sec):
-    """Adiciona cabeçalho (LAUDO TÉCNICO + linha) e rodapé (endereço)."""
+    """Adiciona cabeçalho (LAUDO TÉCNICO + linha) e rodapé (endereço + nº página)."""
     # ── Cabeçalho ───────────────────────────────────────────────────────────
     hdr = sec.header
 
@@ -478,13 +516,14 @@ def _add_docx_header_footer(sec):
     p0 = hdr.paragraphs[0]
     p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Parágrafo 1 — "LAUDO TÉCNICO" em cinza 26pt
+    # Parágrafo 1 — "LAUDO TÉCNICO" em cinza escuro 18pt
     p1 = hdr.add_paragraph()
     p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p1.paragraph_format.space_after = Pt(4)
     run1 = p1.add_run("LAUDO TÉCNICO")
     run1.font.name = "Arial"
-    run1.font.size = Pt(26)
-    run1.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+    run1.font.size = Pt(18)
+    run1.font.color.rgb = RGBColor(0x40, 0x40, 0x40)  # cinza escuro, lê bem em P&B
 
     # Parágrafo 2 — linha horizontal (borda inferior do parágrafo)
     p2 = hdr.add_paragraph()
@@ -493,7 +532,7 @@ def _add_docx_header_footer(sec):
     pBdr = OxmlElement('w:pBdr')
     bottom = OxmlElement('w:bottom')
     bottom.set(qn('w:val'), 'single')
-    bottom.set(qn('w:sz'), '32')    # 4pt — equivalente ao traço do modelo
+    bottom.set(qn('w:sz'), '32')
     bottom.set(qn('w:space'), '1')
     bottom.set(qn('w:color'), '000000')
     pBdr.append(bottom)
@@ -502,22 +541,41 @@ def _add_docx_header_footer(sec):
     # ── Rodapé ──────────────────────────────────────────────────────────────
     ftr = sec.footer
 
+    # Borda superior no primeiro parágrafo do rodapé (espelha regra do cabeçalho)
+    pPr0f = ftr.paragraphs[0]._p.get_or_add_pPr()
+    pBdr0f = OxmlElement('w:pBdr')
+    top_bdr = OxmlElement('w:top')
+    top_bdr.set(qn('w:val'), 'single')
+    top_bdr.set(qn('w:sz'), '8')    # 1pt
+    top_bdr.set(qn('w:space'), '1')
+    top_bdr.set(qn('w:color'), '808080')
+    pBdr0f.append(top_bdr)
+    pPr0f.append(pBdr0f)
+
+    # Linha 1: nome (10pt) — linhas 2-4: dados em 9pt (hierarquia tipográfica)
     footer_lines = [
-        "Ari Vladimir Copesco Júnior",
-        "Engenheiro Segurança do Trabalho CREA 060097553-3",
-        "Rua Marechal Rondon, n° 224 Fone (016) 3235-6763",
-        "Ribeirão Preto/SP CEP 14.025-430",
+        ("Ari Vladimir Copesco Júnior",                             10),
+        ("Engenheiro Segurança do Trabalho CREA 060097553-3",       9),
+        ("Rua Marechal Rondon, n° 224  ·  Fone (016) 3235-6763",   9),
+        ("Ribeirão Preto/SP  ·  CEP 14.025-430",                   9),
     ]
 
-    for i, line in enumerate(footer_lines):
+    for i, (line, size) in enumerate(footer_lines):
         p = ftr.paragraphs[0] if i == 0 else ftr.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after  = Pt(0)
         run = p.add_run(line)
-        run.font.name = "Arial"
-        run.font.size = Pt(10)
+        run.font.name   = "Arial"
+        run.font.size   = Pt(size)
         run.font.italic = True
+
+    # Número de página centralizado
+    p_num = ftr.add_paragraph()
+    p_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_num.paragraph_format.space_before = Pt(3)
+    p_num.paragraph_format.space_after  = Pt(0)
+    _footer_add_page_number(p_num)
 
 
 # Padrões para formatação especial nos quesitos
@@ -531,7 +589,7 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
         sec.top_margin      = Emu(540385)
         sec.bottom_margin   = Emu(360045)
         sec.left_margin     = Emu(1080135)
-        sec.right_margin    = Emu(900430)
+        sec.right_margin    = Emu(1080135)   # margens simétricas (era 900430 ~2,5 cm)
         sec.header_distance = Emu(180340)
         sec.footer_distance = Emu(360045)
         _add_docx_header_footer(sec)
@@ -539,6 +597,7 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
     sty = doc.styles["Normal"]
     sty.font.name = "Arial"
     sty.font.size = Pt(12)
+    sty.paragraph_format.line_spacing = 1.15   # espaçamento 1,15× — mais legível
 
     for raw in text.split("\n"):
         s = raw.strip()
@@ -546,7 +605,6 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
             doc.add_paragraph("")
             continue
         p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(4)
 
         def _run(txt, bold=False, italic=False):
             r = p.add_run(txt)
@@ -556,9 +614,15 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
             r.italic = italic
 
         if _is_header(s):
-            p.paragraph_format.space_before = Pt(14)
-            _run(s, bold=True)
+            p.paragraph_format.space_before = Pt(18)
+            p.paragraph_format.space_after  = Pt(6)
+            r = p.add_run(s)
+            r.font.name = "Arial"
+            r.font.size = Pt(13)   # um ponto acima do corpo → hierarquia clara
+            r.bold = True
         else:
+            p.paragraph_format.space_after = Pt(5)
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             m_resp = _RE_RESPOSTA.match(s)
             m_ques = _RE_QUESITO_N.match(s)
             if m_resp:
@@ -572,28 +636,30 @@ def save_docx(text: str, out: str, avaliacoes_paths: list | None = None):
                 _run(m_ques.group(1), bold=True)
                 _run(m_ques.group(2))
             else:
+                # Parágrafo de corpo: recuo de primeira linha (padrão jurídico)
+                p.paragraph_format.first_line_indent = Cm(1.25)
                 _run(s)
 
     # ── Anexos: páginas dos PDFs de avaliação ──────────────────────────────
     if avaliacoes_paths:
         doc.add_page_break()
+
+        # Cabeçalho da seção de anexos com mesma hierarquia das seções do laudo
         ph = doc.add_paragraph()
-        ph.paragraph_format.space_before = Pt(14)
-        ph.paragraph_format.space_after  = Pt(10)
+        ph.paragraph_format.space_before = Pt(18)
+        ph.paragraph_format.space_after  = Pt(6)
         rh = ph.add_run("ANEXOS — AVALIAÇÕES TÉCNICAS")
         rh.bold = True
         rh.font.name = "Arial"
-        rh.font.size = Pt(12)
+        rh.font.size = Pt(13)
 
-        # Largura disponível: página menos margens (~16 cm a 150 dpi)
-        usable_width_cm = 16.0
+        usable_width_cm = 15.0   # ajustado às margens simétricas de 3 cm
 
         for aval_path in avaliacoes_paths:
             aval_path = Path(aval_path)
             if aval_path.suffix.lower() != ".pdf":
                 continue
 
-            # Título do documento
             pt = doc.add_paragraph()
             pt.paragraph_format.space_before = Pt(10)
             pt.paragraph_format.space_after  = Pt(4)
