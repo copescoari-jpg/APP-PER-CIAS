@@ -28,13 +28,20 @@ import io
 # CONFIGURAÇÕES
 # ───────────────────────────────────────────────────────────────────────────────
 
-CONFIG_FILE    = Path.home() / ".sistema_ari" / "config.json"
-SISTEMA_ARI    = Path(r"C:\Users\ari\OneDrive\Documentos\SISTEMA ARI")
-LAUDOS_PATH    = SISTEMA_ARI / "LAUDOS"
+CONFIG_FILE         = Path.home() / ".sistema_ari" / "config.json"
+SISTEMA_ARI         = Path(r"C:\Users\ari\OneDrive\Documentos\SISTEMA ARI")
+LAUDOS_PATH         = SISTEMA_ARI / "LAUDOS"
+PARTE_TECNICA_PATH  = SISTEMA_ARI / "parte técnica"
+# tenta as duas grafias (com e sem acento) para a pasta de impugnações
+_imp_a = SISTEMA_ARI / "modelos de impugnação"
+_imp_b = SISTEMA_ARI / "modelos de impugnacao"
+IMPUGNACOES_PATH    = _imp_a if _imp_a.exists() else _imp_b
+
 IMAGE_EXT      = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 MAX_PHOTOS     = 20
 MAX_IMAGE_SIZE = (1280, 1280)
 MODEL          = "claude-sonnet-4-6"
+MAX_TECH_CHARS = 6000   # caracteres por documento técnico enviado ao Claude
 
 MESES_PT = {
     "January": "janeiro", "February": "fevereiro", "March": "março",
@@ -311,13 +318,107 @@ def load_profile_files() -> tuple[str, str]:
         perfil.read_text(encoding="utf-8")  if perfil.exists()  else "",
     )
 
+# ── Mapeamento agente → NHOs relevantes ────────────────────────────────────
+_TECH_REF_MAP: dict[str, list[str]] = {
+    "ruído":          ["NHO01.pdf"],
+    "calor":          ["NHO6-051_000012204.pdf"],
+    "vibração":       ["NHO08_000002517.pdf", "NHO_09_subst_2_000002292.pdf"],
+    "rni":            ["NHO-11_f_4_000001530.pdf"],
+    "hidrocarboneto": [],   # sem NHO própria — usa NR-15
+}
+
+# ── Mapeamento agente → modelo de impugnação ────────────────────────────────
+_IMPUG_MAP: dict[str, str] = {
+    "ruído":          "Paulo César Binhardi X São Martinho - Ruído e RNI Solda.docx",
+    "rni":            "Paulo César Binhardi X São Martinho - Ruído e RNI Solda.docx",
+    "vibração":       "Gelson Lopes de Almeida X São Martinho - Vibração acima (realizou avaliação).docx",
+    "calor":          "Israel Mazier X São Martinho - Calor - RNI Solar.docx",
+    "hidrocarboneto": "Marcelo Pereira dos Santos X São Martinho - Hidrocarbonetos.docx",
+}
+
+
+def _detectar_agentes(texto: str) -> list[str]:
+    """Detecta tipos de agente a partir do texto do processo."""
+    t = texto.lower()
+    agentes = []
+    if any(k in t for k in ["ruído", "ruido", "dosimetri", "nho01", "nho-01",
+                              "db(a)", "dba", "nps ", "pressão sonora"]):
+        agentes.append("ruído")
+    if any(k in t for k in ["calor", "ibutg", "nho06", "nho-06", "nho6",
+                              "temperatura", "tgbh"]):
+        agentes.append("calor")
+    if any(k in t for k in ["vibração", "vibracao", "nho08", "nho-08",
+                              "nho09", "nho-09", "vibrat"]):
+        agentes.append("vibração")
+    if any(k in t for k in ["rni", "radiação não ionizante", "radiacao nao ionizante",
+                              "solda", "ultravioleta", "infravermelho", "nho11", "nho-11"]):
+        agentes.append("rni")
+    if any(k in t for k in ["hidrocarboneto", "benzeno", "tolueno",
+                              "químico", "quimico", "agente químico"]):
+        agentes.append("hidrocarboneto")
+    return agentes if agentes else ["geral"]
+
+
+def load_reference_laudos(n: int = 2) -> str:
+    """Carrega N laudos reais (mais recentes) como referência de formato e vocabulário."""
+    if not LAUDOS_PATH.exists():
+        return ""
+    parts = []
+    for f in sorted(LAUDOS_PATH.glob("*.docx"),
+                    key=lambda x: x.stat().st_mtime, reverse=True):
+        txt = extract_docx_text(str(f))
+        if len(txt) > 800:
+            parts.append(f"=== LAUDO REFERÊNCIA: {f.stem[:70]} ===\n{txt[:5000]}")
+        if len(parts) >= n:
+            break
+    return "\n\n".join(parts)
+
+
 def load_reference_laudo() -> str:
-    """Carrega o primeiro laudo real como exemplo de formato."""
-    if LAUDOS_PATH.exists():
-        for f in sorted(LAUDOS_PATH.glob("*.docx")):
-            txt = extract_docx_text(str(f))
-            if len(txt) > 800:
-                return txt[:7000]
+    """Mantido por compatibilidade — use load_reference_laudos()."""
+    return load_reference_laudos(n=1)
+
+
+def load_tech_refs(agentes: list[str]) -> str:
+    """Carrega texto das NHOs relevantes para os agentes detectados (máx. 3 docs)."""
+    if not PARTE_TECNICA_PATH.exists():
+        return ""
+    arquivos: list[Path] = []
+    for ag in agentes:
+        for fname in _TECH_REF_MAP.get(ag, []):
+            p = PARTE_TECNICA_PATH / fname
+            if p.exists() and p not in arquivos:
+                arquivos.append(p)
+    # Inclui NR-15 se não houver NHO mapeada (ex.: hidrocarbonetos, geral)
+    if not arquivos:
+        nr15 = PARTE_TECNICA_PATH / "nr-15-atualizada-2025.pdf"
+        if nr15.exists():
+            arquivos.append(nr15)
+    parts = []
+    for p in arquivos[:3]:
+        txt = extract_pdf_text(str(p))
+        if txt and not txt.startswith("[Erro"):
+            parts.append(f"=== {p.stem} ===\n{txt[:MAX_TECH_CHARS]}")
+    return "\n\n".join(parts)
+
+
+def load_modelo_impugnacao(agentes: list[str]) -> str:
+    """Carrega o modelo de impugnação mais adequado ao tipo de agente."""
+    if not IMPUGNACOES_PATH.exists():
+        return ""
+    for ag in agentes:
+        fname = _IMPUG_MAP.get(ag)
+        if fname:
+            p = IMPUGNACOES_PATH / fname
+            if p.exists():
+                txt = extract_docx_text(str(p))
+                if txt:
+                    return f"=== MODELO DE IMPUGNAÇÃO — {ag.upper()} ===\n{txt[:MAX_TECH_CHARS]}"
+    # Fallback: primeiro arquivo disponível
+    for f in sorted(IMPUGNACOES_PATH.glob("*.docx")):
+        txt = extract_docx_text(str(f))
+        if txt and len(txt) > 200:
+            return f"=== MODELO DE IMPUGNAÇÃO ===\n{txt[:MAX_TECH_CHARS]}"
     return ""
 
 AVALIACAO_KEYWORDS = [
@@ -756,7 +857,7 @@ MAX_AVAL_PAGES = 4   # máximo de páginas por PDF de avaliação enviadas ao Cl
 
 def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
                 ref_laudo="", obs="", avaliacoes="", avaliacoes_paths=None,
-                progress_cb=None) -> str:
+                tech_refs="", progress_cb=None) -> str:
     client = anthropic.Anthropic(api_key=api_key)
 
     ref_block = (
@@ -771,6 +872,11 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
     aval_block = (
         f"\n=== AVALIAÇÕES TÉCNICAS — TEXTO EXTRAÍDO ===\n{avaliacoes}\n"
     ) if avaliacoes else ""
+
+    tech_block = (
+        f"\n=== REFERÊNCIAS TÉCNICAS (NHOs/NRs aplicáveis — observe rigorosamente"
+        f" os limites e metodologias) ===\n{tech_refs}\n"
+    ) if tech_refs else ""
 
     system_prompt = (
         "Você é o assistente de escrita de Ari Vladimir Copesco Junior,\n"
@@ -794,6 +900,7 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
         f"=== PRÉ-LAUDO (preparado pelas secretárias) ===\n{pre_laudo}\n\n"
         f"=== ANOTAÇÕES DE CAMPO / DADOS DA DILIGÊNCIA ===\n{campo}\n\n"
         f"{aval_block}"
+        f"{tech_block}"
     )
     if aval_pdfs:
         intro += "=== AVALIAÇÕES TÉCNICAS — IMAGENS DOS DOCUMENTOS (seguem abaixo) ===\n"
@@ -878,7 +985,8 @@ REGRAS DE VOZ E ESTILO:
 """
 
 def gerar_resposta(api_key, doc_recebido, meu_laudo, agente_md, perfil_md,
-                   obs="", progress_cb=None) -> str:
+                   obs="", modelo_impugnacao="", tech_refs="",
+                   progress_cb=None) -> str:
     client = anthropic.Anthropic(api_key=api_key)
 
     laudo_ctx = (
@@ -888,6 +996,16 @@ def gerar_resposta(api_key, doc_recebido, meu_laudo, agente_md, perfil_md,
     obs_block = (
         f"\n=== OBSERVAÇÕES DO PERITO (considerar obrigatoriamente) ===\n{obs}\n"
     ) if obs else ""
+
+    modelo_block = (
+        f"\n{modelo_impugnacao}\n"
+        "(Use este modelo como referência de estrutura, linguagem e linha técnica "
+        "— adapte ao caso concreto, não copie ipsis litteris)\n"
+    ) if modelo_impugnacao else ""
+
+    tech_block = (
+        f"\n=== REFERÊNCIAS TÉCNICAS (NHOs/NRs aplicáveis) ===\n{tech_refs}\n"
+    ) if tech_refs else ""
 
     system_prompt = (
         "Você é Ari Vladimir Copesco Júnior, Engenheiro de Segurança do Trabalho\n"
@@ -908,6 +1026,8 @@ def gerar_resposta(api_key, doc_recebido, meu_laudo, agente_md, perfil_md,
         f"=== DOCUMENTO RECEBIDO (Impugnação ou Quesitos Complementares) ===\n"
         f"{doc_recebido}"
         f"{laudo_ctx}"
+        f"{modelo_block}"
+        f"{tech_block}"
         f"\nElabore agora a resposta completa."
     )
 
@@ -1610,9 +1730,14 @@ class App(ctk.CTk):
                     parts.append(f"=== {p.name} ===\n{txt}")
                 avaliacoes_text = "\n\n".join(parts)
 
+            # Detecta agentes e carrega referências técnicas relevantes
+            self._set_sl("Carregando referências técnicas (NHOs/NRs)...")
+            agentes = _detectar_agentes((pre or "") + (camp or "") + (avaliacoes_text or ""))
+            tech_refs = load_tech_refs(agentes)
+
             self._set_sl("Carregando perfil de escrita e laudos de referência...")
             agente, perfil = load_profile_files()
-            ref = load_reference_laudo()
+            ref = load_reference_laudos(n=2)
             obs = self.obs_laudo.get("1.0", "end").strip()
 
             fname = build_laudo_filename(
@@ -1627,6 +1752,7 @@ class App(ctk.CTk):
                 photos=self.photos_list, agente_md=agente, perfil_md=perfil,
                 ref_laudo=ref, obs=obs, avaliacoes=avaliacoes_text,
                 avaliacoes_paths=self.avaliacoes_paths or None,
+                tech_refs=tech_refs,
                 progress_cb=self._set_sl,
             )
 
@@ -1706,6 +1832,13 @@ class App(ctk.CTk):
             if self.meu_laudo_path.get():
                 self._set_sr("Lendo meu laudo original...")
                 laudo = extract_text(self.meu_laudo_path.get())
+
+            # Detecta agente e carrega modelo de impugnação + referências técnicas
+            self._set_sr("Carregando modelo de impugnação e referências técnicas...")
+            agentes = _detectar_agentes((doc or "") + (laudo or ""))
+            modelo_impug = load_modelo_impugnacao(agentes)
+            tech_refs    = load_tech_refs(agentes)
+
             self._set_sr("Carregando perfil de escrita...")
             agente, perfil = load_profile_files()
             obs = self.obs_resp.get("1.0", "end").strip()
@@ -1716,7 +1849,8 @@ class App(ctk.CTk):
             txt = gerar_resposta(
                 api_key=self.api_key, doc_recebido=doc, meu_laudo=laudo,
                 agente_md=agente, perfil_md=perfil,
-                obs=obs, progress_cb=self._set_sr,
+                obs=obs, modelo_impugnacao=modelo_impug, tech_refs=tech_refs,
+                progress_cb=self._set_sr,
             )
 
             self._set_sr("Salvando .docx...")
