@@ -3,9 +3,23 @@ SISTEMA ARI — GeraLaudo
 Interface Streamlit: geração de laudos periciais e impugnações.
 """
 
+import os
 import re
 import threading
 from pathlib import Path
+
+# Prefixo Windows para caminhos > 260 chars (MAX_PATH)
+_LONG_PFX = '\\\\?\\'
+
+
+def _walk_safe(folder: Path):
+    """Varre recursivamente com suporte a caminhos longos no Windows."""
+    root = str(folder.resolve())
+    scan = _LONG_PFX + root if len(root) > 240 else root
+    for dirpath, _, filenames in os.walk(scan):
+        base = dirpath.replace(_LONG_PFX, '', 1)
+        for fname in filenames:
+            yield Path(os.path.join(base, fname))
 
 import streamlit as st
 
@@ -75,9 +89,7 @@ def auto_detect(pasta: str) -> dict:
     imp_doc     = None
     fotos       = []
 
-    for p in sorted(folder.rglob("*")):
-        if not p.is_file():
-            continue
+    for p in _walk_safe(folder):
         ext = p.suffix.lower()
         if ext in FOTO_EXTS:
             fotos.append(p)
@@ -92,7 +104,13 @@ def auto_detect(pasta: str) -> dict:
             docs.append(p)
 
     # documento principal: preferir .docx, depois mais recente
-    docs.sort(key=lambda p: (0 if p.suffix.lower() == ".docx" else 1, -p.stat().st_mtime))
+    def _mtime(p: Path) -> float:
+        try:
+            lp = _LONG_PFX + str(p.resolve())
+            return os.stat(lp).st_mtime
+        except OSError:
+            return 0.0
+    docs.sort(key=lambda p: (0 if p.suffix.lower() == ".docx" else 1, -_mtime(p)))
     main_doc = docs[0] if docs else None
     fotos    = sorted(fotos, key=lambda p: p.name)[:MAX_FOTOS]
 
