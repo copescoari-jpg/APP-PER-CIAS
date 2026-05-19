@@ -9,7 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core.pdf_reader  import extrair_texto, extrair_texto_pdf, extrair_texto_docx
+from core.pdf_reader  import extrair_texto_pdf, extrair_texto_docx
 from core.prompts     import montar_prompt_laudo, montar_prompt_impugnacao, SYSTEM_PROMPT_LAUDO, SYSTEM_PROMPT_IMPUGNACAO
 from core.claude_runner import chamar_claude
 from core.vault       import detectar_agentes, carregar_contexto_nr
@@ -23,7 +23,7 @@ _RE_RECDA = re.compile(r'Reclamada[:\s]+([A-ZÁÉÍÓÚÃÕÂÊÎÔÛÇÀÜ][a-z
 _RE_FUNC  = re.compile(r'[Ff]un[cç][aã]o[:\s]+([A-ZÁÉÍÓÚÃÕÂÊÎÔÛÇÀÜ][\wÀ-ú\s]+)', re.I)
 
 FOTO_EXTS   = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-DOC_EXTS    = {".docx", ".pdf"}
+DOC_EXTS    = {".docx", ".pdf", ".doc", ".dotx", ".dotm"}
 EVAL_TOKENS = {"avalia", "medic", "relat", "nho", "nr-", "laudo_avaliacao", "dosim"}
 LAUDO_TOKENS = {"laudo", "periç", "peric"}
 IMP_TOKENS   = {"impugn", "quesit", "complement", "esclarec"}
@@ -55,8 +55,10 @@ def _is_impugnacao(p: Path) -> bool:
 
 def _extrair_texto_doc(p: Path) -> str:
     ext = p.suffix.lower()
-    if ext == ".docx":
-        return extrair_texto_docx(p)
+    if ext in {".docx", ".doc", ".dotx", ".dotm"}:
+        txt = extrair_texto_docx(p)
+        if not txt.startswith("[Erro"):
+            return txt
     if ext == ".pdf":
         return extrair_texto_pdf(p, max_chars=40_000)
     return ""
@@ -82,7 +84,6 @@ def auto_detect(pasta: str) -> dict:
             continue
         if ext not in DOC_EXTS:
             continue
-        nl = _nome_lower(p)
         if _is_avaliacao(p):
             avaliacoes.append(p)
         elif _is_impugnacao(p):
