@@ -69,7 +69,9 @@ COR_AVISO       = "#a85a00"
 COR_ERRO        = "#a01a1a"
 COR_BORDA       = "#c8d0db"
 COR_OBS_BG      = "#fffef0"   # área de observações
-COR_OBS_BORDA   = "#c8b96a"
+COR_OBS_BORDA   = "#c8a020"   # borda âmbar observações
+COR_FUNDO_INFO  = "#f0f6ff"   # card de informações detectadas
+COR_BORDA_INFO  = "#8ab0d4"   # borda card de info
 
 FONTE_BASE      = "Segoe UI"
 FONT_TITULO     = (FONTE_BASE, 24, "bold")
@@ -178,6 +180,19 @@ def _extrair_campo(texto: str, label: str) -> str:
     return ''
 
 
+_RE_PROC = re.compile(r'\b(\d{4,7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})\b')
+
+def _extrair_numero_processo(texto: str, nome_pasta: str = "") -> str:
+    """Extrai nº processo no formato CNJ/TRT de texto ou nome de pasta."""
+    for src in [texto, nome_pasta]:
+        if not src:
+            continue
+        m = _RE_PROC.search(src)
+        if m:
+            return m.group(1)
+    return ""
+
+
 def parse_processo(path: str) -> dict:
     """
     Extrai Reclamante, Reclamada, Função e tipo de um arquivo (.docx/.pdf).
@@ -217,39 +232,38 @@ def parse_processo(path: str) -> dict:
     data['insalubr']  = bool(re.search(r'(?i)insalubr',    text))
     data['periculos'] = bool(re.search(r'(?i)periculosid', text))
 
+    if 'numero_processo' not in data:
+        np = _extrair_numero_processo(text, Path(path).stem)
+        if np:
+            data['numero_processo'] = np
+
     return data
 
 
 def parse_processo_da_pasta(folder: str, det: dict) -> dict:
-    """
-    Extrai dados do processo combinando: nome da pasta → pré-laudo → campo.
-    det é o resultado de auto_detect().
-    """
+    """Extrai dados do processo combinando nome da pasta + documento principal."""
     data = {}
 
-    # 1. Nome da pasta do processo
+    # 1. Nome da pasta
     partes = _extrair_partes_do_nome(Path(folder).name)
     data.update(partes)
 
-    # 2. Pré-laudo (arquivo mais confiável para dados estruturados)
-    if det.get('pre_laudo') and not (data.get('reclamante') and data.get('reclamada')):
+    # 2. Documento principal (main_doc ou pre_laudo para compat)
+    main = det.get('main_doc') or det.get('pre_laudo')
+    if main:
         try:
-            d = parse_processo(det['pre_laudo'])
+            d = parse_processo(main)
             for k, v in d.items():
                 if k not in data or not data[k]:
                     data[k] = v
         except Exception:
             pass
 
-    # 3. Campo (complementar)
-    if det.get('campo') and not (data.get('reclamante') and data.get('reclamada')):
-        try:
-            d = parse_processo(det['campo'])
-            for k, v in d.items():
-                if k not in data or not data[k]:
-                    data[k] = v
-        except Exception:
-            pass
+    # 3. Número do processo a partir da pasta (se ainda não encontrado)
+    if 'numero_processo' not in data or not data['numero_processo']:
+        np = _extrair_numero_processo("", Path(folder).name)
+        if np:
+            data['numero_processo'] = np
 
     return data
 
@@ -444,26 +458,77 @@ def _eh_avaliacao(nome_lower: str) -> bool:
 
 def auto_detect(folder: str) -> dict:
     fp = Path(folder)
-    r = {"pre_laudo": None, "campo": None,
-         "photos_sub": None, "photo_count": 0,
-         "laudo": None, "avaliacoes": []}
+    r: dict = {
+        "main_doc":        None,
+        "pre_laudo":       None,   # alias backward compat
+        "campo":           None,   # obsoleto
+        "imp_doc":         None,   # impugnação/quesitos
+        "laudo":           None,
+        "photos_sub":      None,
+        "photo_count":     0,
+        "photos_list":     [],
+        "avaliacoes":      [],
+        "processo_numero": "",
+    }
+
+    main_candidates: list[tuple[float, Path]] = []
+
     for item in fp.iterdir():
         nl = item.name.lower()
-        if item.is_dir():
-            fotos = [f for f in item.iterdir()
-                     if f.is_file() and f.suffix.lower() in IMAGE_EXT]
-            if len(fotos) > r["photo_count"]:
-                r["photos_sub"]  = str(item)
-                r["photo_count"] = len(fotos)
-        elif item.is_file() and item.suffix.lower() in DOCX_PDF:
-            if any(k in nl for k in ["pre-laudo","pre_laudo","prelaudo","preliminar","secretari"]):
-                r["pre_laudo"] = str(item)
-            elif any(k in nl for k in ["campo","anotac","diligencia"]):
-                r["campo"] = str(item)
-            elif nl.startswith("laudo") and "impugnac" not in nl and "esclar" not in nl:
-                r["laudo"] = str(item)
-            elif _eh_avaliacao(nl):
+        if item.is_file() and item.suffix.lower() in DOCX_PDF:
+            is_laudo     = nl.startswith("laudo") and "impugnac" not in nl and "esclar" not in nl
+            is_avaliacao = _eh_avaliacao(nl)
+            is_imp       = any(k in nl for k in [
+                "impugnac", "esclarecimento", "quesito", "complement",
+                "assistente", "atq",
+            ])
+            if is_laudo:
+                if r["laudo"] is None or item.stat().st_mtime > Path(r["laudo"]).stat().st_mtime:
+                    r["laudo"] = str(item)
+            elif is_avaliacao:
                 r["avaliacoes"].append(item)
+            elif is_imp:
+                if r["imp_doc"] is None or item.stat().st_mtime > Path(r["imp_doc"]).stat().st_mtime:
+                    r["imp_doc"] = str(item)
+            else:
+                main_candidates.append((item.stat().st_mtime, item))
+
+    # Seleciona main_doc: prefere .docx mais recente
+    if main_candidates:
+        docx_c = [(t, p) for t, p in main_candidates if p.suffix.lower() == ".docx"]
+        chosen = sorted(docx_c or main_candidates, key=lambda x: x[0], reverse=True)[0][1]
+        r["main_doc"] = str(chosen)
+        r["pre_laudo"] = r["main_doc"]
+
+    # Fotos recursivas (pasta + 1 nível de subpastas)
+    all_photos: list[Path] = []
+    best_sub, best_cnt = None, 0
+    for child in fp.iterdir():
+        if child.is_file() and child.suffix.lower() in IMAGE_EXT:
+            all_photos.append(child)
+        elif child.is_dir():
+            sub_fotos = [f for f in child.iterdir()
+                         if f.is_file() and f.suffix.lower() in IMAGE_EXT]
+            all_photos.extend(sub_fotos)
+            if len(sub_fotos) > best_cnt:
+                best_cnt = len(sub_fotos)
+                best_sub = str(child)
+    all_photos.sort(key=lambda p: p.name.lower())
+    r["photos_list"]  = all_photos[:MAX_PHOTOS]
+    r["photo_count"]  = len(r["photos_list"])
+    r["photos_sub"]   = best_sub
+
+    # Extrai número do processo
+    if r["main_doc"]:
+        try:
+            ext = Path(r["main_doc"]).suffix.lower()
+            txt = _extract_docx_lines(r["main_doc"]) if ext == ".docx" else extract_pdf_text(r["main_doc"])
+            r["processo_numero"] = _extrair_numero_processo(txt, Path(folder).name)
+        except Exception:
+            r["processo_numero"] = _extrair_numero_processo("", Path(folder).name)
+    else:
+        r["processo_numero"] = _extrair_numero_processo("", Path(folder).name)
+
     r["avaliacoes"].sort(key=lambda p: p.name.lower())
     return r
 
@@ -855,19 +920,21 @@ REGRAS ABSOLUTAS — LAUDO PERICIAL (prioridade máxima):
 MAX_AVAL_PAGES = 4   # máximo de páginas por PDF de avaliação enviadas ao Claude
 
 
-def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
+def gerar_laudo(api_key, doc_text, photos, agente_md, perfil_md,
                 ref_laudo="", obs="", avaliacoes="", avaliacoes_paths=None,
-                tech_refs="", progress_cb=None) -> str:
+                tech_refs="", numero_processo="", progress_cb=None,
+                # compat aliases (ignorados internamente)
+                pre_laudo="", campo="") -> str:
     client = anthropic.Anthropic(api_key=api_key)
+
+    # Se chamado com API antiga (pre_laudo + campo), mescla em doc_text
+    if not doc_text and (pre_laudo or campo):
+        doc_text = (pre_laudo + "\n\n" + campo).strip()
 
     ref_block = (
         f"\nEXEMPLO REAL DE LAUDO DO ARI (referência de formato, vocabulário e estrutura):\n"
         f"{ref_laudo}\n(— fim do exemplo —)\n"
     ) if ref_laudo else ""
-
-    obs_block = (
-        f"\n=== OBSERVAÇÕES DO PERITO (considerar obrigatoriamente na elaboração) ===\n{obs}\n"
-    ) if obs else ""
 
     aval_block = (
         f"\n=== AVALIAÇÕES TÉCNICAS — TEXTO EXTRAÍDO ===\n{avaliacoes}\n"
@@ -893,12 +960,31 @@ def gerar_laudo(api_key, pre_laudo, campo, photos, agente_md, perfil_md,
     aval_pdfs = [Path(p) for p in (avaliacoes_paths or [])
                  if Path(p).suffix.lower() == ".pdf"]
 
-    user_parts = []
+    user_parts: list = []
+
+    # Observações do perito — PRIORIDADE MÁXIMA — inseridas PRIMEIRO
+    if obs:
+        user_parts.append({"type": "text", "text": (
+            "=== OBSERVAÇÕES DO PERITO — PRIORIDADE ABSOLUTA ===\n"
+            "INSTRUÇÃO CRÍTICA: o conteúdo abaixo tem prioridade MÁXIMA sobre "
+            "QUALQUER dado dos documentos fornecidos. Se houver contradição entre "
+            "estas observações e o restante do material, as observações DO PERITO "
+            "prevalecem SEMPRE.\n\n"
+            f"{obs}\n"
+            "=== FIM DAS OBSERVAÇÕES DE PRIORIDADE MÁXIMA ===\n"
+        )})
+
+    np_info = f"\nNúmero do processo: {numero_processo}\n" if numero_processo else ""
+    doc_block = (
+        f"=== DOCUMENTO DO PROCESSO ===\n"
+        f"(Elaborado pelas secretárias com dados do processo e das diligências)\n"
+        f"{np_info}"
+        f"{doc_text}\n"
+    )
+
     intro = (
-        f"Elabore o laudo pericial COMPLETO com base nos documentos abaixo."
-        f"{obs_block}\n"
-        f"=== PRÉ-LAUDO (preparado pelas secretárias) ===\n{pre_laudo}\n\n"
-        f"=== ANOTAÇÕES DE CAMPO / DADOS DA DILIGÊNCIA ===\n{campo}\n\n"
+        f"Elabore o laudo pericial COMPLETO com base nos documentos abaixo.\n\n"
+        f"{doc_block}"
         f"{aval_block}"
         f"{tech_block}"
     )
@@ -1107,10 +1193,11 @@ class App(ctk.CTk):
         self.config_data  = load_config()
         self.api_key      = self.config_data.get("api_key", "")
 
-        self.processo_folder = ctk.StringVar()
-        self.pre_laudo_path  = ctk.StringVar()
-        self.campo_path      = ctk.StringVar()
-        self.photos_sub      = ctk.StringVar()
+        self.processo_folder  = ctk.StringVar()
+        self.doc_path         = ctk.StringVar()   # único documento do processo
+        self.pre_laudo_path   = self.doc_path     # alias backward compat
+        self.numero_processo  = ctk.StringVar()
+        self.photos_sub       = ctk.StringVar()
         self.photos_list: list     = []
         self.avaliacoes_paths: list = []
 
@@ -1126,9 +1213,8 @@ class App(ctk.CTk):
 
         self._pausar_trace = False
 
-        # Auto-preenchimento ao selecionar documentos manualmente
-        self.pre_laudo_path.trace_add('write', self._on_doc_changed)
-        self.campo_path.trace_add('write', self._on_doc_changed)
+        # Auto-preenchimento ao selecionar documento manualmente
+        self.doc_path.trace_add('write', self._on_doc_changed)
 
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
@@ -1219,28 +1305,47 @@ class App(ctk.CTk):
     # ── Aba: Gerar Laudo ─────────────────────────────────────────────────────
 
     def _build_laudo_tab(self, parent):
-        # Wrapper com grid: linha 0 = scroll (expande), linha 1 = botão fixo
         wrapper = ctk.CTkFrame(parent, fg_color=COR_FUNDO, corner_radius=0)
         wrapper.pack(fill="both", expand=True)
         wrapper.grid_rowconfigure(0, weight=1)
         wrapper.grid_rowconfigure(1, weight=0)
         wrapper.grid_columnconfigure(0, weight=1)
 
-        # ── Área rolável com os passos ──────────────────────────────────────
         main = ctk.CTkScrollableFrame(wrapper, fg_color=COR_FUNDO)
         main.grid(row=0, column=0, sticky="nsew")
 
-        # Passo 2 — Identificação do Processo
+        # ── Card 2 — Documento do Processo ────────────────────────────────
         c2 = self._cartao(main)
-        self._titulo_passo(c2, "2", "Identificação do Processo",
-                            "Preenchido automaticamente ao escolher a pasta.")
+        self._titulo_passo(c2, "2", "Documento do Processo",
+                            "Detectado automaticamente. Altere se necessário.")
+        self._file_row(c2, self.doc_path,
+                       [("Word / PDF", "*.docx *.pdf")],
+                       lambda: self.processo_folder.get() or None)
+        self.doc_detect_lbl = ctk.CTkLabel(
+            c2, text="Aguardando seleção da pasta…",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
+        )
+        self.doc_detect_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        row_rec = ctk.CTkFrame(c2, fg_color="transparent")
-        row_rec.pack(fill="x", padx=24, pady=(4, 8))
-        for label, var, w in [
-            ("Reclamante", self.reclamante, 1),
-            ("Reclamada",  self.reclamada,  1),
-        ]:
+        # ── Card 3 — Informações do Processo ─────────────────────────────
+        c3 = self._cartao_info(main)
+        self._titulo_passo(c3, "3", "Informações do Processo",
+                            "Verifique os dados extraídos e corrija se necessário.",
+                            icon_color=COR_SECUNDARIO)
+
+        # Número do processo (largura total)
+        row_np = ctk.CTkFrame(c3, fg_color="transparent")
+        row_np.pack(fill="x", padx=24, pady=(4, 8))
+        ctk.CTkLabel(row_np, text="Número do Processo", font=FONT_LABEL,
+                     text_color=COR_TEXTO, anchor="w").pack(anchor="w")
+        ctk.CTkEntry(row_np, textvariable=self.numero_processo, height=ALTURA_ENTRY,
+                     font=FONT_ENTRY, border_color=COR_BORDA, text_color=COR_TEXTO,
+                     placeholder_text="0000000-00.0000.0.00.0000").pack(fill="x", pady=(2, 0))
+
+        # Reclamante / Reclamada
+        row_rec = ctk.CTkFrame(c3, fg_color="transparent")
+        row_rec.pack(fill="x", padx=24, pady=(0, 8))
+        for label, var in [("Reclamante", self.reclamante), ("Reclamada", self.reclamada)]:
             col = ctk.CTkFrame(row_rec, fg_color="transparent")
             col.pack(side="left", fill="x", expand=True,
                      padx=(0, 16) if label == "Reclamante" else (0, 0))
@@ -1250,9 +1355,9 @@ class App(ctk.CTk):
                          font=FONT_ENTRY, border_color=COR_BORDA,
                          text_color=COR_TEXTO).pack(fill="x", pady=(2, 0))
 
-        row_fc = ctk.CTkFrame(c2, fg_color="transparent")
+        # Função / Tipo
+        row_fc = ctk.CTkFrame(c3, fg_color="transparent")
         row_fc.pack(fill="x", padx=24, pady=(0, 8))
-
         col_fn = ctk.CTkFrame(row_fc, fg_color="transparent")
         col_fn.pack(side="left", fill="x", expand=True, padx=(0, 16))
         ctk.CTkLabel(col_fn, text="Função / Cargo", font=FONT_LABEL,
@@ -1268,101 +1373,75 @@ class App(ctk.CTk):
         row_chk = ctk.CTkFrame(col_tp, fg_color="transparent")
         row_chk.pack(anchor="w", pady=(6, 0))
         ctk.CTkCheckBox(row_chk, text=" Insalubridade",
-                        variable=self.tipo_insalubr,
-                        font=FONT_LABEL, text_color=COR_TEXTO,
-                        fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-                        checkbox_width=24, checkbox_height=24,
+                        variable=self.tipo_insalubr, font=FONT_LABEL,
+                        text_color=COR_TEXTO, fg_color=COR_ACAO,
+                        hover_color=COR_ACAO_HOVER, checkbox_width=24, checkbox_height=24,
                         ).pack(side="left", padx=(0, 20))
         ctk.CTkCheckBox(row_chk, text=" Periculosidade",
-                        variable=self.tipo_periculos,
-                        font=FONT_LABEL, text_color=COR_TEXTO,
-                        fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
-                        checkbox_width=24, checkbox_height=24,
+                        variable=self.tipo_periculos, font=FONT_LABEL,
+                        text_color=COR_TEXTO, fg_color=COR_ACAO,
+                        hover_color=COR_ACAO_HOVER, checkbox_width=24, checkbox_height=24,
                         ).pack(side="left")
 
-        self.ident_status = ctk.CTkLabel(
-            c2, text="Aguardando seleção da pasta…",
+        # Divisor
+        ctk.CTkFrame(c3, fg_color=COR_BORDA_INFO, height=1).pack(fill="x", padx=24, pady=(10, 8))
+
+        # Fotos
+        row_fotos = ctk.CTkFrame(c3, fg_color="transparent")
+        row_fotos.pack(fill="x", padx=24, pady=(0, 6))
+        self.photos_lbl = ctk.CTkLabel(
+            row_fotos, text="Fotos: nenhuma encontrada.",
             font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.ident_status.pack(fill="x", padx=24, pady=(6, 14))
-
-        # Passo 3 — Pré-laudo
-        c3 = self._cartao(main)
-        self._titulo_passo(c3, "3", "Pré-Laudo",
-                            "Documento preparado pelas secretárias.")
-        self._file_row(c3, self.pre_laudo_path,
-                       [("Word / PDF", "*.docx *.pdf")],
-                       lambda: self.processo_folder.get() or None)
-
-        # Passo 4 — Campo
-        c4 = self._cartao(main)
-        self._titulo_passo(c4, "4", "Anotações de Campo",
-                            "Dados coletados durante a diligência.")
-        self._file_row(c4, self.campo_path,
-                       [("Word / PDF", "*.docx *.pdf")],
-                       lambda: self.processo_folder.get() or None)
-
-        # Passo 5 — Fotos
-        c5 = self._cartao(main)
-        self._titulo_passo(c5, "5", "Fotos da Diligência",
-                            "Subpasta onde estão as imagens.")
-        row5 = ctk.CTkFrame(c5, fg_color="transparent")
-        row5.pack(fill="x", padx=24, pady=(4, 8))
-        ctk.CTkEntry(
-            row5, textvariable=self.photos_sub,
-            height=ALTURA_ENTRY, font=FONT_ENTRY,
-            border_color=COR_BORDA, text_color=COR_TEXTO,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 12))
+        self.photos_lbl.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
-            row5, text="ESCOLHER SUBPASTA", width=220, height=ALTURA_ENTRY,
+            row_fotos, text="TROCAR PASTA", width=160, height=38,
             font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
             corner_radius=8, command=self._pick_photos_sub,
         ).pack(side="right")
 
-        self.photos_lbl = ctk.CTkLabel(
-            c5, text="Nenhuma subpasta selecionada.",
+        # Avaliações
+        row_aval = ctk.CTkFrame(c3, fg_color="transparent")
+        row_aval.pack(fill="x", padx=24, pady=(0, 8))
+        self.aval_lbl = ctk.CTkLabel(
+            row_aval, text="Avaliações: nenhuma encontrada.",
             font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.photos_lbl.pack(fill="x", padx=24, pady=(0, 14))
-
-        # Passo 6 — Avaliações Técnicas
-        c6 = self._cartao(main)
-        self._titulo_passo(c6, "6", "Avaliações Técnicas",
-                            "Detectadas automaticamente na pasta do processo. "
-                            "Use os botões abaixo para incluir/remover manualmente.")
-
-        row6 = ctk.CTkFrame(c6, fg_color="transparent")
-        row6.pack(fill="x", padx=24, pady=(4, 6))
+        self.aval_lbl.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
-            row6, text="ADICIONAR ARQUIVO(S)", width=240, height=ALTURA_BTN - 8,
-            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
-            corner_radius=8, command=self._pick_avaliacoes,
-        ).pack(side="left", padx=(0, 12))
-        ctk.CTkButton(
-            row6, text="LIMPAR", width=120, height=ALTURA_BTN - 8,
+            row_aval, text="LIMPAR", width=100, height=38,
             font=FONT_BTN, fg_color="#7a8190", hover_color="#5a6270",
             corner_radius=8, command=self._clear_avaliacoes,
-        ).pack(side="left")
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            row_aval, text="ADICIONAR", width=130, height=38,
+            font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
+            corner_radius=8, command=self._pick_avaliacoes,
+        ).pack(side="right")
 
-        self.aval_lbl = ctk.CTkLabel(
-            c6, text="Nenhuma avaliação técnica adicionada.",
+        self.ident_status = ctk.CTkLabel(
+            c3, text="Aguardando seleção da pasta…",
             font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
-        self.aval_lbl.pack(fill="x", padx=24, pady=(0, 14))
+        self.ident_status.pack(fill="x", padx=24, pady=(4, 14))
 
-        # Passo 7 — Observações
-        c7 = self._cartao(main)
-        self._titulo_passo(c7, "7", "Observações",
-                            "Opcional — instruções, medições ou pontos a destacar.")
-
+        # ── Card 4 — Observações ──────────────────────────────────────────
+        c4 = self._cartao_obs(main)
+        self._titulo_passo(c4, "4", "Observações do Perito",
+                            icon_color=COR_AVISO)
+        ctk.CTkLabel(
+            c4,
+            text="★  PRIORIDADE MÁXIMA — o que você escrever aqui sobrepõe qualquer dado dos documentos.",
+            font=(FONTE_BASE, 13, "bold"), text_color=COR_AVISO, anchor="w", wraplength=900,
+        ).pack(fill="x", padx=24, pady=(0, 6))
         self.obs_laudo = ctk.CTkTextbox(
-            c7, height=160, font=FONT_ENTRY,
-            fg_color=COR_OBS_BG, border_width=2, border_color=COR_OBS_BORDA,
+            c4, height=160, font=FONT_ENTRY,
+            fg_color="#fffdf5", border_width=2, border_color=COR_OBS_BORDA,
             text_color=COR_TEXTO,
         )
-        self.obs_laudo.pack(fill="x", padx=24, pady=(4, 16))
+        self.obs_laudo.pack(fill="x", padx=24, pady=(0, 16))
 
-        # ── Botão fixo (linha 1 do grid — sempre visível) ──────────────────
+        # ── Botão fixo ────────────────────────────────────────────────────
         bottom = ctk.CTkFrame(wrapper, fg_color=COR_FUNDO, corner_radius=0)
         bottom.grid(row=1, column=0, sticky="ew")
 
@@ -1390,30 +1469,41 @@ class App(ctk.CTk):
     # ── Aba: Responder Impugnação ────────────────────────────────────────────
 
     def _build_resposta_tab(self, parent):
-        main = ctk.CTkScrollableFrame(parent, fg_color=COR_FUNDO)
-        main.pack(fill="both", expand=True)
+        wrapper = ctk.CTkFrame(parent, fg_color=COR_FUNDO, corner_radius=0)
+        wrapper.pack(fill="both", expand=True)
+        wrapper.grid_rowconfigure(0, weight=1)
+        wrapper.grid_rowconfigure(1, weight=0)
+        wrapper.grid_columnconfigure(0, weight=1)
 
-        # Passo 3 — Documento recebido
-        c3 = self._cartao(main)
-        self._titulo_passo(c3, "3", "Documento Recebido",
+        main = ctk.CTkScrollableFrame(wrapper, fg_color=COR_FUNDO)
+        main.grid(row=0, column=0, sticky="nsew")
+
+        # ── Card 2 — Documento Recebido ───────────────────────────────────
+        c2 = self._cartao(main)
+        self._titulo_passo(c2, "2", "Documento Recebido",
                             "Impugnação ou quesitos complementares enviados pela parte.")
-        self._file_row(c3, self.imp_doc_path,
+        self._file_row(c2, self.imp_doc_path,
                        [("Word / PDF", "*.docx *.pdf")],
                        lambda: self.processo_folder.get() or None)
+        self.imp_detect_lbl = ctk.CTkLabel(
+            c2, text="Auto-detectado ao selecionar a pasta do processo.",
+            font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
+        )
+        self.imp_detect_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        # Passo 4 — Meu laudo
-        c4 = self._cartao(main)
-        self._titulo_passo(c4, "4", "Meu Laudo",
-                            "Laudo original (referência para defender as conclusões).")
-        row4 = ctk.CTkFrame(c4, fg_color="transparent")
-        row4.pack(fill="x", padx=24, pady=(4, 6))
+        # ── Card 3 — Meu Laudo ────────────────────────────────────────────
+        c3 = self._cartao(main)
+        self._titulo_passo(c3, "3", "Meu Laudo",
+                            "Laudo original gerado — referência para defender as conclusões.")
+        row3 = ctk.CTkFrame(c3, fg_color="transparent")
+        row3.pack(fill="x", padx=24, pady=(4, 6))
         ctk.CTkEntry(
-            row4, textvariable=self.meu_laudo_path,
+            row3, textvariable=self.meu_laudo_path,
             height=ALTURA_ENTRY, font=FONT_ENTRY,
             border_color=COR_BORDA, text_color=COR_TEXTO,
         ).pack(side="left", fill="x", expand=True, padx=(0, 12))
         ctk.CTkButton(
-            row4, text="ESCOLHER ARQUIVO", width=220, height=ALTURA_ENTRY,
+            row3, text="ESCOLHER ARQUIVO", width=220, height=ALTURA_ENTRY,
             font=FONT_BTN, fg_color=COR_SECUNDARIO, hover_color=COR_SEC_HOVER,
             corner_radius=8,
             command=lambda: self._pick_file(
@@ -1421,76 +1511,95 @@ class App(ctk.CTk):
                 [("Word / PDF", "*.docx *.pdf")],
                 self.processo_folder.get() or None),
         ).pack(side="right")
-
         self.laudo_ref_lbl = ctk.CTkLabel(
-            c4,
-            text="Auto-detectado ao selecionar a pasta do processo.",
+            c3, text="Auto-detectado ao selecionar a pasta do processo.",
             font=FONT_AJUDA, text_color=COR_TEXTO_FRACO, anchor="w",
         )
         self.laudo_ref_lbl.pack(fill="x", padx=24, pady=(0, 14))
 
-        # Passo 5 — Observações
-        c5 = self._cartao(main)
-        self._titulo_passo(c5, "5", "Observações",
-                            "Opcional — pontos específicos a destacar na resposta.")
+        # ── Card 4 — Observações ──────────────────────────────────────────
+        c4 = self._cartao_obs(main)
+        self._titulo_passo(c4, "4", "Observações do Perito", icon_color=COR_AVISO)
+        ctk.CTkLabel(
+            c4,
+            text="★  PRIORIDADE MÁXIMA — sobrepõe qualquer dado dos documentos.",
+            font=(FONTE_BASE, 13, "bold"), text_color=COR_AVISO, anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 6))
         self.obs_resp = ctk.CTkTextbox(
-            c5, height=160, font=FONT_ENTRY,
-            fg_color=COR_OBS_BG, border_width=2, border_color=COR_OBS_BORDA,
+            c4, height=160, font=FONT_ENTRY,
+            fg_color="#fffdf5", border_width=2, border_color=COR_OBS_BORDA,
             text_color=COR_TEXTO,
         )
-        self.obs_resp.pack(fill="x", padx=24, pady=(4, 16))
+        self.obs_resp.pack(fill="x", padx=24, pady=(0, 16))
 
-        # Botão grande
+        # ── Botão fixo ────────────────────────────────────────────────────
+        bottom = ctk.CTkFrame(wrapper, fg_color=COR_FUNDO, corner_radius=0)
+        bottom.grid(row=1, column=0, sticky="ew")
+
         self.btn_resp = ctk.CTkButton(
-            main, text="▶   GERAR RESPOSTA / ESCLARECIMENTOS",
+            bottom, text="▶   GERAR RESPOSTA / ESCLARECIMENTOS",
             height=ALTURA_BTN_GR, font=FONT_BTN_GR, corner_radius=12,
             fg_color=COR_ACAO, hover_color=COR_ACAO_HOVER,
             command=self._start_resposta,
         )
-        self.btn_resp.pack(padx=24, pady=(8, 6), fill="x")
+        self.btn_resp.pack(fill="x", padx=24, pady=(10, 4))
 
         self.prog_resp = ctk.CTkProgressBar(
-            main, mode="indeterminate", height=16,
+            bottom, mode="indeterminate", height=14,
             fg_color=COR_DESTAQUE, progress_color=COR_ACAO,
         )
         self.prog_resp.pack(padx=24, fill="x")
         self.prog_resp.set(0)
 
         self.lbl_resp = ctk.CTkLabel(
-            main, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
+            bottom, text="Pronto para gerar.", font=FONT_STATUS, text_color=COR_TEXTO_FRACO,
         )
-        self.lbl_resp.pack(pady=(10, 32))
+        self.lbl_resp.pack(pady=(4, 10))
 
     # ── Helpers de UI ────────────────────────────────────────────────────────
 
     def _cartao(self, parent, padx=24, pady=(0, 12)):
-        """Cartão branco com borda suave que agrupa um passo do fluxo."""
+        """Cartão branco com borda suave."""
         card = ctk.CTkFrame(
-            parent, fg_color=COR_FUNDO_CARD, corner_radius=12,
+            parent, fg_color=COR_FUNDO_CARD, corner_radius=14,
             border_width=1, border_color=COR_BORDA,
         )
         card.pack(fill="x", padx=padx, pady=pady)
         return card
 
-    def _titulo_passo(self, parent, num: str, titulo: str, ajuda: str = ""):
-        """Cabeçalho de cartão: bolinha azul com número + título + descrição."""
+    def _cartao_info(self, parent, padx=24, pady=(0, 12)):
+        """Cartão azul claro para informações detectadas."""
+        card = ctk.CTkFrame(
+            parent, fg_color=COR_FUNDO_INFO, corner_radius=14,
+            border_width=2, border_color=COR_BORDA_INFO,
+        )
+        card.pack(fill="x", padx=padx, pady=pady)
+        return card
+
+    def _cartao_obs(self, parent, padx=24, pady=(0, 12)):
+        """Cartão âmbar para observações de prioridade máxima."""
+        card = ctk.CTkFrame(
+            parent, fg_color=COR_OBS_BG, corner_radius=14,
+            border_width=2, border_color=COR_OBS_BORDA,
+        )
+        card.pack(fill="x", padx=padx, pady=pady)
+        return card
+
+    def _titulo_passo(self, parent, num: str, titulo: str, ajuda: str = "",
+                      icon_color: str | None = None):
+        """Cabeçalho de cartão: bolinha colorida com número + título + descrição."""
+        cor = icon_color or COR_ACAO
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
         wrap.pack(fill="x", padx=24, pady=(18, 6))
 
-        bola = ctk.CTkFrame(
-            wrap, fg_color=COR_ACAO, corner_radius=22, width=44, height=44,
-        )
+        bola = ctk.CTkFrame(wrap, fg_color=cor, corner_radius=24, width=48, height=48)
         bola.pack(side="left", padx=(0, 16))
         bola.pack_propagate(False)
-        ctk.CTkLabel(
-            bola, text=num, font=FONT_PASSO_NUM, text_color="white",
-        ).pack(expand=True)
+        ctk.CTkLabel(bola, text=num, font=FONT_PASSO_NUM, text_color="white").pack(expand=True)
 
         txt = ctk.CTkFrame(wrap, fg_color="transparent")
         txt.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(
-            txt, text=titulo, font=FONT_PASSO, text_color=COR_TEXTO, anchor="w",
-        ).pack(anchor="w")
+        ctk.CTkLabel(txt, text=titulo, font=FONT_PASSO, text_color=COR_TEXTO, anchor="w").pack(anchor="w")
         if ajuda:
             ctk.CTkLabel(
                 txt, text=ajuda, font=FONT_AJUDA, text_color=COR_TEXTO_FRACO,
@@ -1526,47 +1635,75 @@ class App(ctk.CTk):
         self.processo_folder.set(folder)
         det = auto_detect(folder)
 
-        # ── Preenche caminhos detectados ───────────────────────────────────
-        # Desativa trace temporariamente para não disparar _on_doc_changed
-        # antes de termos todos os dados da pasta.
+        # ── Documento principal ─────────────────────────────────────────────
         self._pausar_trace = True
-        if det["pre_laudo"]:
-            self.pre_laudo_path.set(det["pre_laudo"])
-        if det["campo"]:
-            self.campo_path.set(det["campo"])
-        self._pausar_trace = False
-
-        if det["photos_sub"]:
-            self.photos_sub.set(det["photos_sub"])
-            self.photos_list = get_photos(det["photos_sub"])
-            n = min(det["photo_count"], MAX_PHOTOS)
-            self.photos_lbl.configure(
-                text=f"✓  {n} foto(s) na subpasta '{Path(det['photos_sub']).name}'.",
+        if det["main_doc"]:
+            self.doc_path.set(det["main_doc"])
+            self.doc_detect_lbl.configure(
+                text=f"✓  {Path(det['main_doc']).name}",
                 text_color=COR_OK,
             )
+        else:
+            self.doc_path.set("")
+            self.doc_detect_lbl.configure(
+                text="⚠  Nenhum documento encontrado. Selecione manualmente.",
+                text_color=COR_AVISO,
+            )
+        self._pausar_trace = False
+
+        # ── Número do processo ──────────────────────────────────────────────
+        if det.get("processo_numero"):
+            self.numero_processo.set(det["processo_numero"])
+
+        # ── Fotos ───────────────────────────────────────────────────────────
+        self.photos_list = det["photos_list"]
+        n = len(self.photos_list)
+        if n:
+            sub = f"  ({Path(det['photos_sub']).name})" if det.get("photos_sub") else ""
+            self.photos_lbl.configure(
+                text=f"✓  {n} foto(s) encontrada(s){sub}",
+                text_color=COR_OK,
+            )
+        else:
+            self.photos_lbl.configure(
+                text="Fotos: nenhuma encontrada.",
+                text_color=COR_TEXTO_FRACO,
+            )
+
+        # ── Avaliações ──────────────────────────────────────────────────────
+        if det["avaliacoes"]:
+            self.avaliacoes_paths = list(det["avaliacoes"])
+            self._update_aval_label()
+        else:
+            self.avaliacoes_paths = []
+            self.aval_lbl.configure(
+                text="Avaliações: nenhuma encontrada.",
+                text_color=COR_TEXTO_FRACO,
+            )
+
+        # ── Aba de resposta ─────────────────────────────────────────────────
         if det["laudo"]:
             self.meu_laudo_path.set(det["laudo"])
             self.laudo_ref_lbl.configure(
                 text=f"✓  Detectado: {Path(det['laudo']).name}",
                 text_color=COR_OK,
             )
-        if det["avaliacoes"]:
-            self.avaliacoes_paths = list(det["avaliacoes"])
-            self._update_aval_label()
+        if det.get("imp_doc"):
+            self.imp_doc_path.set(det["imp_doc"])
+            self.imp_detect_lbl.configure(
+                text=f"✓  Detectado: {Path(det['imp_doc']).name}",
+                text_color=COR_OK,
+            )
 
+        # ── Resumo no Passo 1 ───────────────────────────────────────────────
         partes = [
-            "Pré-laudo: " + ("✓" if det["pre_laudo"] else "—"),
-            "Campo: "     + ("✓" if det["campo"]     else "—"),
-            f"Fotos: {min(det['photo_count'], MAX_PHOTOS)}" if det["photo_count"] else "Fotos: —",
-            "Laudo anterior: " + ("✓" if det["laudo"] else "—"),
+            "Documento: " + ("✓" if det["main_doc"] else "—"),
+            f"Fotos: {n}" if n else "Fotos: —",
             f"Avaliações: {len(det['avaliacoes'])}" if det["avaliacoes"] else "Avaliações: —",
+            "Processo nº: " + ("✓" if det.get("processo_numero") else "—"),
         ]
-        self.detect_lbl.configure(
-            text="   ".join(partes),
-            text_color=COR_TEXTO,
-        )
+        self.detect_lbl.configure(text="   ".join(partes), text_color=COR_TEXTO)
 
-        # ── Lê dados do processo (pasta + documentos) ──────────────────────
         self._auto_fill_identificacao(folder, det)
 
     def _pick_photos_sub(self):
@@ -1635,24 +1772,24 @@ class App(ctk.CTk):
         save_config(self.config_data)
 
     def _on_doc_changed(self, *_):
-        """Chamado pelo trace quando pré-laudo ou campo é trocado manualmente."""
+        """Chamado quando o documento do processo é trocado manualmente."""
         if getattr(self, '_pausar_trace', False):
             return
         folder = self.processo_folder.get()
-        det = {
-            'pre_laudo': self.pre_laudo_path.get() or None,
-            'campo':     self.campo_path.get() or None,
-        }
+        det = {'main_doc': self.doc_path.get() or None}
         self._auto_fill_identificacao(folder or '', det)
 
     def _auto_fill_identificacao(self, folder: str, det: dict):
-        """Extrai e preenche Reclamante, Reclamada, Função e tipo."""
+        """Extrai e preenche nº processo, Reclamante, Reclamada, Função e tipo."""
         try:
             data = parse_processo_da_pasta(folder, det)
         except Exception:
             data = {}
 
         filled = []
+        if data.get('numero_processo') and not self.numero_processo.get():
+            self.numero_processo.set(data['numero_processo'])
+            filled.append('Nº Processo')
         if data.get('reclamante'):
             self.reclamante.set(data['reclamante'])
             filled.append('Reclamante')
@@ -1702,10 +1839,8 @@ class App(ctk.CTk):
             erros.append("- Chave API não configurada (clique em ⚙ Configurar API)")
         if not self.processo_folder.get():
             erros.append("- Pasta do processo não selecionada (Passo 1)")
-        if not self.pre_laudo_path.get():
-            erros.append("- Pré-laudo não selecionado (Passo 2)")
-        if not self.campo_path.get():
-            erros.append("- Anotações de campo não selecionadas (Passo 3)")
+        if not self.doc_path.get():
+            erros.append("- Documento do processo não selecionado (Passo 2)")
         if erros:
             messagebox.showerror("Campos obrigatórios", "\n".join(erros))
             return
@@ -1716,10 +1851,8 @@ class App(ctk.CTk):
 
     def _laudo_thread(self):
         try:
-            self._set_sl("Lendo pré-laudo...")
-            pre  = extract_text(self.pre_laudo_path.get())
-            self._set_sl("Lendo anotações de campo...")
-            camp = extract_text(self.campo_path.get())
+            self._set_sl("Lendo documento do processo...")
+            doc_text = extract_text(self.doc_path.get())
 
             avaliacoes_text = ""
             if self.avaliacoes_paths:
@@ -1732,7 +1865,7 @@ class App(ctk.CTk):
 
             # Detecta agentes e carrega referências técnicas relevantes
             self._set_sl("Carregando referências técnicas (NHOs/NRs)...")
-            agentes = _detectar_agentes((pre or "") + (camp or "") + (avaliacoes_text or ""))
+            agentes = _detectar_agentes((doc_text or "") + (avaliacoes_text or ""))
             tech_refs = load_tech_refs(agentes)
 
             self._set_sl("Carregando perfil de escrita e laudos de referência...")
@@ -1748,11 +1881,12 @@ class App(ctk.CTk):
             out = output_path(self.processo_folder.get(), fname)
 
             txt = gerar_laudo(
-                api_key=self.api_key, pre_laudo=pre, campo=camp,
+                api_key=self.api_key, doc_text=doc_text,
                 photos=self.photos_list, agente_md=agente, perfil_md=perfil,
                 ref_laudo=ref, obs=obs, avaliacoes=avaliacoes_text,
                 avaliacoes_paths=self.avaliacoes_paths or None,
                 tech_refs=tech_refs,
+                numero_processo=self.numero_processo.get(),
                 progress_cb=self._set_sl,
             )
 
