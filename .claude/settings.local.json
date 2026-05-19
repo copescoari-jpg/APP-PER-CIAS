@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"C:\\\\Users\\\\ari\\\\OneDrive\\\\Documentos\\\\SISTEMA ARI\\\\modelos de impugançao\")",
+      "Read(//c/Users/ari/OneDrive/Documentos/SISTEMA ARI/modelos de impugançao/**)",
+      "Bash(python3.12 -c ' *)",
+      "PowerShell(ls \"$env:USERPROFILE\\\\.claude\")"
+    ]
+  }
+}

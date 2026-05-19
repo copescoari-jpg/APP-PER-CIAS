@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 SCRIPT_DIR = Path(__file__).parent.resolve()
 ICON_OUT   = SCRIPT_DIR / "icone_ari.ico"
 VBS_OUT    = SCRIPT_DIR / "iniciar_app.vbs"
-APP_PY     = SCRIPT_DIR / "app.py"
+MAIN_PY    = SCRIPT_DIR / "main.py"
 
 
 # ── Geração do ícone ──────────────────────────────────────────────────────────
@@ -22,31 +22,25 @@ def gerar_icone() -> None:
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    NAVY  = (27,  52,  85)   # azul-marinho (cor principal do app)
-    GOLD  = (196, 160,  60)  # dourado (acento jurídico)
+    NAVY  = (27,  52,  85)
+    GOLD  = (196, 160,  60)
     WHITE = (255, 255, 255)
-    LGRAY = (210, 220, 235)  # sombra do canto dobrado
-    LBLUE = ( 80, 110, 155)  # subtítulo
+    LGRAY = (210, 220, 235)
+    LBLUE = ( 80, 110, 155)
 
-    # Fundo azul-marinho com cantos arredondados
     d.rounded_rectangle([(0, 0), (S-1, S-1)], radius=52, fill=NAVY)
 
-    # Documento: cartão branco com canto superior direito dobrado
     M, TOP, BOT, FOLD = 46, 44, 202, 32
     d.polygon(
         [(M, TOP), (S-M-FOLD, TOP), (S-M, TOP+FOLD), (S-M, BOT), (M, BOT)],
         fill=WHITE,
     )
-    # Triângulo do canto dobrado (cinza-claro)
     d.polygon(
         [(S-M-FOLD, TOP), (S-M, TOP+FOLD), (S-M-FOLD, TOP+FOLD)],
         fill=LGRAY,
     )
-
-    # Barra dourada no topo do documento
     d.rectangle([(M, TOP), (S-M-FOLD, TOP+8)], fill=GOLD)
 
-    # Fontes — usa Arial do Windows
     try:
         from PIL import ImageFont
         fb = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 64)
@@ -54,17 +48,14 @@ def gerar_icone() -> None:
     except Exception:
         fb = fs = ImageFont.load_default()
 
-    # "ARI" — centralizado no documento
     bb = d.textbbox((0, 0), "ARI", font=fb)
     tx = (S - (bb[2] - bb[0])) // 2 - bb[0]
     ty = TOP + 28 - bb[1]
     d.text((tx, ty), "ARI", fill=NAVY, font=fb)
 
-    # Linha divisória dourada
     ly = ty + (bb[3] - bb[1]) + 12
     d.line([(M + 18, ly), (S - M - 18, ly)], fill=GOLD, width=2)
 
-    # Subtítulo "LAUDOS PERICIAIS"
     try:
         bb2 = d.textbbox((0, 0), "LAUDOS PERICIAIS", font=fs)
         sx  = (S - (bb2[2] - bb2[0])) // 2 - bb2[0]
@@ -82,11 +73,12 @@ def gerar_icone() -> None:
 # ── Launcher VBScript (sem janela de console) ─────────────────────────────────
 
 def criar_vbs() -> None:
-    """Lança o app com python3.12 sem abrir janela de console."""
-    vbs = (
-        f'CreateObject("WScript.Shell").Run '
-        f'"python3.12 " & Chr(34) & "{APP_PY}" & Chr(34), 0, False\n'
+    """Lança o Streamlit com python3.12 sem abrir janela de console."""
+    cmd = (
+        f'python3.12 -m streamlit run "{MAIN_PY}" '
+        '--server.headless false --browser.gatherUsageStats false'
     )
+    vbs = f'CreateObject("WScript.Shell").Run "{cmd}", 0, False\n'
     VBS_OUT.write_text(vbs, encoding="utf-8")
     print(f"  Launcher: {VBS_OUT}")
 
@@ -94,14 +86,13 @@ def criar_vbs() -> None:
 # ── Atalho na área de trabalho ────────────────────────────────────────────────
 
 def criar_atalho() -> None:
-    # Obtém caminho correto do Desktop (funciona mesmo com OneDrive)
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "[Environment]::GetFolderPath('Desktop')"],
         capture_output=True, text=True,
     )
     desktop = Path(r.stdout.strip())
-    lnk = desktop / "SISTEMA ARI.lnk"
+    lnk     = desktop / "SISTEMA ARI.lnk"
     wscript = r"C:\Windows\System32\wscript.exe"
 
     ps = "\n".join([
@@ -134,8 +125,8 @@ def criar_atalho() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Criando icone e atalho do SISTEMA ARI...\n")
+    print("Atualizando icone e atalho do SISTEMA ARI...\n")
     gerar_icone()
     criar_vbs()
     criar_atalho()
-    print("\nConcluido! Procure 'SISTEMA ARI' na area de trabalho.")
+    print("\nConcluido! Clique em 'SISTEMA ARI' na area de trabalho.")
