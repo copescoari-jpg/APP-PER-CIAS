@@ -21,8 +21,8 @@ def chamar_claude(
     Chama o Claude Code CLI em modo não-interativo.
 
     Args:
-        prompt: Mensagem do usuário (pode ser muito longa — enviada via stdin).
-        system_prompt: System prompt completo (substitui o padrão do CLI).
+        prompt: Mensagem do usuário (enviada via stdin).
+        system_prompt: System prompt completo (salvo em arquivo temporário).
         model: 'sonnet', 'opus', 'haiku' ou nome completo do modelo.
         timeout: Timeout em segundos (padrão: 5 min).
         progress_cb: Callback(str) para atualizar status na UI.
@@ -33,23 +33,34 @@ def chamar_claude(
     if progress_cb:
         progress_cb("Chamando Claude CLI — aguarde...")
 
-    cmd = [
-        CLAUDE_EXE,
-        "--print",
-        "--system-prompt", system_prompt,
-        "--model", model,
-        "--output-format", "text",
-    ]
+    # Grava system prompt em arquivo temporário para evitar
+    # limite de tamanho de argumentos do Windows
+    sp_file = Path(tempfile.mktemp(suffix="_sp.txt"))
+    sp_file.write_text(system_prompt, encoding="utf-8")
 
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=timeout,
-        cwd=tempfile.gettempdir(),  # evita CLAUDE.md auto-discovery
-    )
+    try:
+        cmd = [
+            CLAUDE_EXE,
+            "--print",
+            "--no-session-persistence",   # não salva sessão em disco
+            "--system-prompt-file", str(sp_file),
+            "--model", model,
+            "--output-format", "text",
+            "--tools", "",                # desativa ferramentas — só geração de texto
+        ]
+
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            cwd=tempfile.gettempdir(),
+        )
+
+    finally:
+        sp_file.unlink(missing_ok=True)
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
@@ -66,8 +77,8 @@ def testar_claude() -> bool:
     """Verifica se o Claude CLI está acessível e funcionando."""
     try:
         r = subprocess.run(
-            [CLAUDE_EXE, "--print", "Responda apenas: OK"],
-            capture_output=True, text=True, encoding="utf-8", timeout=30,
+            [CLAUDE_EXE, "--print", "--no-session-persistence", "Responda apenas: OK"],
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
             cwd=tempfile.gettempdir(),
         )
         return r.returncode == 0 and "OK" in r.stdout
