@@ -42,11 +42,10 @@ def chamar_claude(
         cmd = [
             CLAUDE_EXE,
             "--print",
-            "--no-session-persistence",   # não salva sessão em disco
+            "--no-session-persistence",
             "--system-prompt-file", str(sp_file),
             "--model", model,
             "--output-format", "text",
-            "--tools", "",                # desativa ferramentas — só geração de texto
         ]
 
         result = subprocess.run(
