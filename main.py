@@ -169,11 +169,12 @@ def _gerar_laudo_thread(doc_text, obs, numero_processo, reclamante, reclamada,
     """Executa geração em thread separada para não travar a UI."""
     try:
         agentes   = detectar_agentes(doc_text)
-        nr_ctx    = carregar_contexto_nr(agentes)
+        # max_docs=1 evita prompt excessivamente longo que causa timeout
+        nr_ctx    = carregar_contexto_nr(agentes, max_docs=1)
         prompt    = montar_prompt_laudo(doc_text, obs=obs,
                                         nr_contexto=nr_ctx,
                                         numero_processo=numero_processo)
-        texto     = chamar_claude(prompt, SYSTEM_PROMPT_LAUDO, model="sonnet", timeout=360)
+        texto     = chamar_claude(prompt, SYSTEM_PROMPT_LAUDO, model="sonnet", timeout=600)
 
         nome_arq  = construir_nome_arquivo(reclamante, reclamada,
                                            insalubridade, periculosidade, funcao)
@@ -199,7 +200,7 @@ def _gerar_laudo_thread(doc_text, obs, numero_processo, reclamante, reclamada,
 def _gerar_impugnacao_thread(doc_text, laudo_text, obs, pasta_saida, result_store):
     try:
         prompt = montar_prompt_impugnacao(doc_text, meu_laudo=laudo_text, obs=obs)
-        texto  = chamar_claude(prompt, SYSTEM_PROMPT_IMPUGNACAO, model="sonnet", timeout=300)
+        texto  = chamar_claude(prompt, SYSTEM_PROMPT_IMPUGNACAO, model="sonnet", timeout=600)
         caminho = caminho_saida(pasta_saida, "Esclarecimentos")
         salvar_docx(texto, caminho)
         result_store["texto"]   = texto

@@ -21,8 +21,8 @@ def chamar_claude(
     Chama o Claude Code CLI em modo não-interativo.
 
     Args:
-        prompt: Mensagem do usuário (enviada via stdin).
-        system_prompt: System prompt completo (salvo em arquivo temporário).
+        prompt: Mensagem do usuário.
+        system_prompt: System prompt completo.
         model: 'sonnet', 'opus', 'haiku' ou nome completo do modelo.
         timeout: Timeout em segundos (padrão: 5 min).
         progress_cb: Callback(str) para atualizar status na UI.
@@ -33,8 +33,7 @@ def chamar_claude(
     if progress_cb:
         progress_cb("Chamando Claude CLI — aguarde...")
 
-    # Grava system prompt em arquivo temporário para evitar
-    # limite de tamanho de argumentos do Windows
+    # System prompt via arquivo — evita limite de tamanho de argumento do Windows
     sp_file = Path(tempfile.mktemp(suffix="_sp.txt"))
     sp_file.write_text(system_prompt, encoding="utf-8")
 
@@ -77,9 +76,9 @@ def testar_claude() -> bool:
     try:
         r = subprocess.run(
             [CLAUDE_EXE, "--print", "--no-session-persistence", "Responda apenas: OK"],
-            capture_output=True, text=True, encoding="utf-8", timeout=60,
+            capture_output=True, timeout=60,
             cwd=tempfile.gettempdir(),
         )
-        return r.returncode == 0 and "OK" in r.stdout
+        return r.returncode == 0 and b"OK" in r.stdout
     except Exception:
         return False

@@ -9,7 +9,7 @@ from core.pdf_reader import extrair_texto_pdf, extrair_texto_docx
 
 VAULT_PATH = Path(r"C:\Users\ari\OneDrive\Documentos\SISTEMA ARI\parte técnica")
 
-MAX_CHARS_POR_DOC = 6000
+MAX_CHARS_POR_DOC = 3000
 
 # Mapeamento agente → arquivos do vault
 _VAULT_MAP: dict[str, list[str]] = {
