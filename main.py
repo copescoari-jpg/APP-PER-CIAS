@@ -38,9 +38,12 @@ _RE_FUNC  = re.compile(r'[Ff]un[cç][aã]o[:\s]+([A-ZÁÉÍÓÚÃÕÂÊÎÔÛÇ�
 
 FOTO_EXTS   = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 DOC_EXTS    = {".docx", ".pdf", ".doc", ".dotx", ".dotm"}
-EVAL_TOKENS = {"avalia", "medic", "relat", "nho", "nr-", "laudo_avaliacao", "dosim"}
+EVAL_TOKENS  = {"avalia", "nho", "nr-", "laudo_avaliacao", "dosim", "medicao", "medição"}
 LAUDO_TOKENS = {"laudo", "periç", "peric"}
 IMP_TOKENS   = {"impugn", "quesit", "complement", "esclarec"}
+
+# Padrão "Reclamante x Reclamada" — identifica o documento do processo
+_RE_PROCESSO = re.compile(r'\s+x\s+')
 
 MAX_FOTOS = 20
 
@@ -95,6 +98,10 @@ def auto_detect(pasta: str) -> dict:
             fotos.append(p)
             continue
         if ext not in DOC_EXTS:
+            continue
+        # Padrão "Parte A x Parte B" → sempre é o documento do processo
+        if _RE_PROCESSO.search(_nome_lower(p)):
+            docs.append(p)
             continue
         if _is_avaliacao(p):
             avaliacoes.append(p)
